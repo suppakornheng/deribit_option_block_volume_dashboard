@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <title>BTC Options Block Volume Profile Tracker</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #0d1117; color: #c9d1d9; }
+        * { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    </style>
+</head>
+<body class="p-6">
+
+    <div id="uploadScreen" class="flex flex-col items-center justify-center min-h-[85vh]">
+        <div class="max-w-2xl w-full grid grid-cols-1 md:grid-cols-2 gap-6 bg-gray-900 border border-gray-800 rounded-2xl p-8 shadow-2xl">
+            
+            <div class="md:col-span-2 text-center pb-2">
+                <h1 class="text-2xl font-bold text-white tracking-wide mb-1">BTC Options Block Profile</h1>
+                <p class="text-xs text-gray-400">Choose a data delivery pipeline to map options volume layers.</p>
+            </div>
+
+            <div class="flex flex-col justify-between p-5 bg-gray-800/20 border border-gray-800 rounded-xl hover:border-gray-700 transition-all">
+                <div>
+                    <h2 class="text-sm font-bold text-gray-200 uppercase tracking-wider mb-2">Pipeline A: Local Data</h2>
+                    <p class="text-xs text-gray-400 mb-4 leading-relaxed">Read static JSONL line-records out of your local storage drive.</p>
+                </div>
+                <label class="flex flex-col items-center justify-center w-full h-28 border border-gray-700 border-dashed rounded-lg cursor-pointer bg-gray-800/40 hover:bg-gray-800/70 transition-all">
+                    <div class="text-center p-3">
+                        <span class="text-xs text-blue-400 font-semibold block mb-0.5">Upload JSONL</span>
+                        <span class="text-[10px] text-gray-500 block">deribit_block_rfqs.jsonl</span>
+                    </div>
+                    <input id="filePicker" type="file" accept=".jsonl,.txt" class="hidden" onchange="handleFileLoading(event)" />
+                </label>
+            </div>
+
+            <div class="flex flex-col justify-between p-5 bg-gray-800/20 border border-gray-800 rounded-xl hover:border-gray-700 transition-all">
+                <div>
+                    <h2 class="text-sm font-bold text-emerald-400 uppercase tracking-wider mb-2">Pipeline B: Deribit API</h2>
+                    <p class="text-xs text-gray-400 mb-3 leading-relaxed">Fetch, paginate, and parse deep historical block RFQ options trades direct from source.</p>
+                    
+                    <div class="grid grid-cols-2 gap-2 mb-4">
+                        <div>
+                            <label class="block text-[10px] text-gray-500 uppercase font-bold mb-1">Currency</label>
+                            <select id="apiCurrency" class="w-full text-xs bg-gray-900 border border-gray-700 text-white rounded p-1.5 focus:outline-none">
+                                <option value="BTC">BTC</option>
+                                <option value="ETH">ETH</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-500 uppercase font-bold mb-1">Lookback (Days)</label>
+                            <input id="apiLookback" type="number" value="30" min="1" max="365" class="w-full text-xs bg-gray-900 border border-gray-700 text-white rounded p-1.5 focus:outline-none">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="space-y-2">
+                    <button id="apiBtnStart" onclick="startLiveApiEngine()" class="w-full text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-lg shadow transition-colors flex items-center justify-center gap-1.5">
+                        <span id="apiBtnSpinner" class="hidden animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></span>
+                        Pull Block RFQs Stream
+                    </button>
+                    
+                    <div id="apiProgressContainer" class="hidden space-y-1.5 pt-2 border-t border-gray-800">
+                        <div class="flex justify-between text-[10px] text-gray-400">
+                            <span id="apiProgressStatus">Ready...</span>
+                            <span id="apiRecordCount">0 records</span>
+                        </div>
+                        <div class="w-full bg-gray-950 h-1.5 rounded-full overflow-hidden">
+                            <div id="apiProgressBar" class="bg-emerald-500 h-full w-0 transition-all duration-150"></div>
+                        </div>
+                        <div id="apiLogOutput" class="text-[9px] text-emerald-400/80 bg-black/40 p-1.5 rounded max-h-16 overflow-y-auto leading-normal whitespace-pre-wrap font-mono"></div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <div id="dashboardScreen" class="hidden opacity-0 transition-opacity duration-300">
+        <div class="flex justify-between items-center mb-6 border-b border-gray-800 pb-4">
+            <div>
+                <h1 class="text-xl font-bold tracking-wide text-white flex items-center gap-2">
+                    <span id="dashTitleAsset">BTC</span> DERIBIT Buy/Sell Volume 
+                    <span id="liveStatusBadge" class="hidden text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800 px-2 py-0.5 rounded-full font-bold">DERIBIT RFQ ENGINE SYNCED</span>
+                </h1>
+                <p class="text-xs text-gray-500 mt-0.5">Aggregated block trades profile via active processing memory arrays.</p>
+            </div>
+            <div class="flex items-center gap-3">
+                <div>
+                    <label class="text-xs text-gray-400 mr-2 uppercase tracking-wider">Expiry:</label>
+                    <select id="expiryFilter" class="bg-gray-900 border border-gray-700 text-white rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500 cursor-pointer" onchange="renderChart()">
+                        <option value="All">All Expiries</option>
+                    </select>
+                </div>
+                <button onclick="downloadDatasetAsJsonl()" class="text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded shadow transition-colors flex items-center gap-1">
+                    💾 Export JSONL
+                </button>
+                <button onclick="stopAndDisconnectDashboard()" class="text-xs bg-gray-800 border border-gray-700 text-gray-300 px-3 py-2 rounded hover:bg-gray-700 transition-colors">
+                    Back
+                </button>
+            </div>
+        </div>
+
+        <div class="relative w-full bg-gray-900/40 p-4 border border-gray-800 rounded-xl" style="height: 78vh;">
+            <canvas id="optionsChart"></canvas>
+        </div>
+    </div>
+
+    <script>
+        let globalDataset = [];
+        let rawFetchedRfqs = []; // Retains unaltered native API structures for export mapping
+        let chartInstance = null;
+        let selectedAsset = 'BTC'; 
+        let isFetchingApi = false;
+
+        // HELPER: Map Deribit DDMMMYY Expiry String to JavaScript Date objects for perfect chronological evaluation
+        function parseExpiryToDate(expiryStr) {
+            const match = expiryStr.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/);
+            if (!match) return new Date(0);
+            
+            const day = parseInt(match[1]);
+            const months = { JAN:0, FEB:1, MAR:2, APR:3, MAY:4, JUN:5, JUL:6, AUG:7, SEP:8, OCT:9, NOV:10, DEC:11 };
+            const month = months[match[2]] || 0;
+            const year = 2000 + parseInt(match[3]);
+            
+            return new Date(year, month, day);
+        }
+
+        // 1. DATA PARSING CORE LOGIC (JSONL Ingestion Engine)
+        function parseRawJsonLines(rawText) {
+            const lines = rawText.split('\n');
+            const records = [];
+            rawFetchedRfqs = []; // Reset backup reference
+
+            lines.forEach(line => {
+                if (!line.trim()) return;
+                try {
+                    const rfq = JSON.parse(line);
+                    rawFetchedRfqs.push(rfq); 
+                    const amount = rfq.amount || 0;
+
+                    (rfq.legs || []).forEach(leg => {
+                        const inst = leg.instrument_name || "";
+                        const match = inst.match(/(BTC|ETH)-([0-9A-Z]+)-(\d+)-([CP])$/);
+                        
+                        if (match) {
+                            records.push({
+                                expiry: match[2],
+                                strike: parseInt(match[3]),
+                                category: `${match[4] === 'C' ? 'Call' : 'Put'} ${(leg.direction || "buy").toLowerCase().charAt(0).toUpperCase() + (leg.direction || "buy").toLowerCase().slice(1)} Blocked`,
+                                volume: parseFloat(amount * (leg.ratio || 1))
+                            });
+                        }
+                    });
+                } catch (err) {}
+            });
+            return records;
+        }
+
+        // 2. PARSING TARGETED BLOCK RFQ TRADES FROM PUBLIC ENDPOINT
+        function parseBlockRfqTradesArray(rfqArray, assetTicker) {
+            const records = [];
+            
+            rfqArray.forEach(rfq => {
+                const amount = rfq.amount || 0;
+                
+                (rfq.legs || []).forEach(leg => {
+                    const inst = leg.instrument_name || "";
+                    const regex = new RegExp(`^${assetTicker}-([0-9A-Z]+)-(\\d+)-([CP])$`);
+                    const match = inst.match(regex);
+                    
+                    if (match) {
+                        const expiry = match[1];
+                        const strike = parseInt(match[2]);
+                        const type = match[3] === 'C' ? 'Call' : 'Put';
+                        const direction = (leg.direction || "buy").toLowerCase();
+                        const formattedDir = direction.charAt(0).toUpperCase() + direction.slice(1);
+                        
+                        records.push({
+                            expiry: expiry,
+                            strike: strike,
+                            category: `${type} ${formattedDir} Blocked`,
+                            volume: parseFloat(amount * (leg.ratio || 1))
+                        });
+                    }
+                });
+            });
+            return records;
+        }
+
+        // UPDATED: Sorts Expiries Chronologically (Soonest to Furthest)
+        function updateExpiryFilterDropdown() {
+            const select = document.getElementById('expiryFilter');
+            const preservedSelectedValue = select.value;
+            
+            select.innerHTML = '<option value="All">All Expiries</option>';
+            
+            const uniqueExpiries = [...new Set(globalDataset.map(d => d.expiry))].sort((a, b) => {
+                return parseExpiryToDate(a) - parseExpiryToDate(b);
+            });
+            
+            uniqueExpiries.forEach(exp => {
+                const opt = document.createElement('option');
+                opt.value = exp; opt.textContent = exp;
+                select.appendChild(opt);
+            });
+
+            if ([...select.options].some(o => o.value === preservedSelectedValue)) {
+                select.value = preservedSelectedValue;
+            }
+        }
+
+        function swapScreenToDashboard() {
+            document.getElementById('uploadScreen').classList.add('hidden');
+            const dash = document.getElementById('dashboardScreen');
+            dash.classList.remove('hidden');
+            setTimeout(() => dash.classList.remove('opacity-0'), 50);
+        }
+
+        function appendApiLog(msg) {
+            const logger = document.getElementById('apiLogOutput');
+            const stamp = new Date().toTimeString().split(' ')[0];
+            logger.innerText += `[${stamp}] ${msg}\n`;
+            logger.scrollTop = logger.scrollHeight;
+        }
+
+        // PIPELINE A: LOCAL DATA UPLOAD FILE
+        function handleFileLoading(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                selectedAsset = 'BTC'; 
+                document.getElementById('dashTitleAsset').innerText = selectedAsset;
+                globalDataset = parseRawJsonLines(e.target.result);
+                updateExpiryFilterDropdown();
+                swapScreenToDashboard();
+                renderChart();
+            };
+            reader.readAsText(file);
+        }
+
+        // PIPELINE B: SEQUENTIAL PAGINATION PARSER ENGINE FOR GET_BLOCK_RFQ_TRADES
+        async function startLiveApiEngine() {
+            if (isFetchingApi) return;
+            isFetchingApi = true;
+
+            const spinner = document.getElementById('apiBtnSpinner');
+            const btn = document.getElementById('apiBtnStart');
+            const progressPanel = document.getElementById('apiProgressContainer');
+            const bar = document.getElementById('apiProgressBar');
+            const statusTxt = document.getElementById('apiProgressStatus');
+            const countTxt = document.getElementById('apiRecordCount');
+            const logger = document.getElementById('apiLogOutput');
+
+            spinner.classList.remove('hidden');
+            btn.disabled = true;
+            progressPanel.classList.remove('hidden');
+            logger.innerText = "";
+            bar.style.width = "0%";
+            
+            selectedAsset = document.getElementById('apiCurrency').value;
+            document.getElementById('dashTitleAsset').innerText = selectedAsset;
+            
+            const lookbackDays = parseInt(document.getElementById('apiLookback').value) || 30;
+            const cutOffTimestamp = Date.now() - (lookbackDays * 24 * 60 * 60 * 1000);
+            
+            let parsedRecordsAccumulator = [];
+            rawFetchedRfqs = []; // Flush previous data arrays
+            let continuationToken = "";
+            let keepLooping = true;
+            let cycleCount = 1;
+
+            appendApiLog(`Targeting ${selectedAsset} Block RFQs back to ${lookbackDays} days ago.`);
+
+            try {
+                while (keepLooping) {
+                    statusTxt.innerText = `Fetching Batch #${cycleCount}...`;
+                    
+                    let url = `https://www.deribit.com/api/v2/public/get_block_rfq_trades?currency=${selectedAsset}`;
+                    if (continuationToken) {
+                        url += `&continuation=${encodeURIComponent(continuationToken)}`;
+                    }
+
+                    const response = await fetch(url, { method: 'GET', cache: 'no-store' });
+                    if (!response.ok) throw new Error(`HTTP network anomaly status code: ${response.status}`);
+                    
+                    const payload = await response.json();
+                    const rawRfqs = payload.result?.block_rfqs || [];
+                    continuationToken = payload.result?.continuation;
+
+                    if (rawRfqs.length === 0) {
+                        appendApiLog("Hit the edge of the public transaction matrix stream.");
+                        break;
+                    }
+
+                    // Save raw objects to allow JSONL download mapping later
+                    rawFetchedRfqs = rawFetchedRfqs.concat(rawRfqs);
+
+                    const batchMapped = parseBlockRfqTradesArray(rawRfqs, selectedAsset);
+                    parsedRecordsAccumulator = parsedRecordsAccumulator.concat(batchMapped);
+                    
+                    const oldestRecordInBatch = rawRfqs[rawRfqs.length - 1];
+                    countTxt.innerText = `${parsedRecordsAccumulator.length} parsed leg records`;
+
+                    const spanDistance = Date.now() - cutOffTimestamp;
+                    const deltaDistance = Date.now() - oldestRecordInBatch.timestamp;
+                    const computedProgress = Math.min(100, Math.max(5, (deltaDistance / spanDistance) * 100));
+                    bar.style.width = `${computedProgress}%`;
+
+                    appendApiLog(`Parsed batch ${cycleCount} (${rawRfqs.length} RFQs). Oldest: ${new Date(oldestRecordInBatch.timestamp).toLocaleDateString()}`);
+
+                    if (oldestRecordInBatch.timestamp < cutOffTimestamp) {
+                        appendApiLog("Temporal lookback barrier breached safely.");
+                        bar.style.width = "100%";
+                        break;
+                    }
+
+                    if (!continuationToken) {
+                        appendApiLog("No valid continuation sequences remaining.");
+                        bar.style.width = "100%";
+                        break;
+                    }
+
+                    cycleCount++;
+                    await new Promise(resolve => setTimeout(resolve, 150));
+                }
+
+                if (parsedRecordsAccumulator.length === 0) {
+                    alert("No valid underlying matching options trades parsed inside specified scope windows.");
+                } else {
+                    globalDataset = parsedRecordsAccumulator;
+                    updateExpiryFilterDropdown();
+                    document.getElementById('liveStatusBadge').classList.remove('hidden');
+                    swapScreenToDashboard();
+                    renderChart();
+                }
+
+            } catch (err) {
+                console.error(err);
+                appendApiLog(`Fatal Pipeline Fault: ${err.message}`);
+                alert(`Engine synchronization anomaly: ${err.message}`);
+            } finally {
+                spinner.classList.add('hidden');
+                btn.disabled = false;
+                isFetchingApi = false;
+                statusTxt.innerText = "Execution process sequence finalized.";
+            }
+        }
+
+        // NEW FEATURE: DATA EXPORT PIPELINE TO LOCAL JSONL FILE
+        function downloadDatasetAsJsonl() {
+            if (rawFetchedRfqs.length === 0) {
+                alert("No active internal records in volatile memory arrays to export.");
+                return;
+            }
+
+            // Map dataset rows cleanly to string lines ending with standard newlines (\n)
+            const jsonlContent = rawFetchedRfqs.map(rfq => JSON.stringify(rfq)).join('\n') + '\n';
+            
+            const blob = new Blob([jsonlContent], { type: 'application/x-jsonlines;charset=utf-8;' });
+            const link = document.createElement("a");
+            const dateStr = new Date().toISOString().split('T')[0];
+            
+            link.href = URL.createObjectURL(blob);
+            link.setAttribute("download", `deribit_block_rfqs_${selectedAsset}_${dateStr}.jsonl`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        // 3. CHART INTERACTION ENGINE
+        function renderChart() {
+            const filterValue = document.getElementById('expiryFilter').value;
+            const scopeData = filterValue === 'All' 
+                ? globalDataset 
+                : globalDataset.filter(d => d.expiry === filterValue);
+
+            const sortedUniqueStrikes = [...new Set(globalDataset.map(d => d.strike))].sort((a,b) => a-b);
+            const categories = ["Call Buy Blocked", "Call Sell Blocked", "Put Buy Blocked", "Put Sell Blocked"];
+            const colors = {
+                "Call Buy Blocked": "#2ca02c", "Call Sell Blocked": "#9467bd",
+                "Put Buy Blocked": "#bcbd22", "Put Sell Blocked": "#1f77b4"
+            };
+
+            const datasets = categories.map(cat => {
+                const isCall = cat.startsWith("Call");
+                
+                const dataPoints = sortedUniqueStrikes.map(strike => {
+                    const matches = scopeData.filter(d => d.strike === strike && d.category === cat);
+                    const sum = matches.reduce((acc, curr) => acc + curr.volume, 0);
+                    return isCall ? -sum : sum; 
+                });
+
+                return {
+                    label: cat,
+                    data: dataPoints,
+                    backgroundColor: colors[cat],
+                    borderColor: colors[cat],
+                    borderWidth: 1,
+                    barThickness: 6, 
+                    grouped: false    
+                };
+            });
+
+            if (chartInstance) { chartInstance.destroy(); }
+
+            const ctx = document.getElementById('optionsChart').getContext('2d');
+            chartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: sortedUniqueStrikes,
+                    datasets: datasets
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            grid: { color: '#161b22' },
+                            ticks: { color: '#8b949e', callback: val => Math.abs(val) }
+                        },
+                        y: {
+                            reverse: true, 
+                            grid: { color: '#161b22' },
+                            ticks: { color: '#8b949e', font: { size: 11 } }
+                        }
+                    },
+                    plugins: {
+                        legend: { position: 'bottom', labels: { color: '#c9d1d9', font: { size: 12 } } },
+                        tooltip: {
+                            mode: 'y',
+                            intersect: false,
+                            backgroundColor: '#161a22',
+                            titleColor: '#ffffff',
+                            bodyColor: '#ffffff',
+                            borderColor: '#30363d',
+                            borderWidth: 1,
+                            padding: 14,
+                            bodyFont: { size: 13 },
+                            titleFont: { size: 14, weight: 'bold' },
+                            callbacks: {
+                                label: function(context) {
+                                    const strike = parseInt(context.label);
+                                    const cat = context.dataset.label;
+                                    
+                                    const matches = scopeData.filter(d => d.strike === strike && d.category === cat);
+                                    if (matches.length === 0) return null;
+
+                                    const categoryTotal = matches.reduce((acc, curr) => acc + curr.volume, 0);
+                                    const outputLines = [` • ${cat}: Total ${categoryTotal.toFixed(1)}`];
+
+                                    const breakdownMap = {};
+                                    matches.forEach(m => {
+                                        breakdownMap[m.expiry] = (breakdownMap[m.expiry] || 0) + m.volume;
+                                    });
+
+                                    Object.entries(breakdownMap).forEach(([expiry, vol]) => {
+                                        outputLines.push(`   ↳ ${vol.toFixed(1)} (${expiry})`);
+                                    });
+
+                                    return outputLines; 
+                                },
+                                footer: function(tooltipItems) {
+                                    let strikeTotal = 0;
+                                    tooltipItems.forEach(item => {
+                                        if (Array.isArray(item.raw)) return; 
+                                        strikeTotal += Math.abs(item.raw);
+                                    });
+                                    return `\nTotal Combined Strike Volume: ${strikeTotal.toFixed(1)}`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function stopAndDisconnectDashboard() {
+            document.getElementById('liveStatusBadge').classList.add('hidden');
+            document.getElementById('filePicker').value = "";
+            document.getElementById('apiProgressContainer').classList.add('hidden');
+            document.getElementById('dashboardScreen').classList.add('hidden', 'opacity-0');
+            document.getElementById('uploadScreen').classList.remove('hidden');
+        }
+    </script>
+</body>
+</html>
