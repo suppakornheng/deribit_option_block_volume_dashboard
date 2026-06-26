@@ -20,6 +20,7 @@
                 <p class="text-xs text-gray-400">Choose a data delivery pipeline to map options volume layers.</p>
             </div>
 
+            <!-- Pipeline A: Local Data -->
             <div class="flex flex-col justify-between p-5 bg-gray-800/20 border border-gray-800 rounded-xl hover:border-gray-700 transition-all">
                 <div>
                     <h2 class="text-sm font-bold text-gray-200 uppercase tracking-wider mb-2">Pipeline A: Local Data</h2>
@@ -34,6 +35,7 @@
                 </label>
             </div>
 
+            <!-- Pipeline B: Deribit API -->
             <div class="flex flex-col justify-between p-5 bg-gray-800/20 border border-gray-800 rounded-xl hover:border-gray-700 transition-all">
                 <div>
                     <h2 class="text-sm font-bold text-emerald-400 uppercase tracking-wider mb-2">Pipeline B: Deribit API</h2>
@@ -76,6 +78,7 @@
         </div>
     </div>
 
+    <!-- Dashboard Screen Panel Area -->
     <div id="dashboardScreen" class="hidden opacity-0 transition-opacity duration-300">
         <div class="flex justify-between items-center mb-6 border-b border-gray-800 pb-4">
             <div>
@@ -108,12 +111,12 @@
 
     <script>
         let globalDataset = [];
-        let rawFetchedRfqs = []; // Retains unaltered native API structures for export mapping
+        let rawFetchedRfqs = []; 
         let chartInstance = null;
         let selectedAsset = 'BTC'; 
         let isFetchingApi = false;
 
-        // HELPER: Map Deribit DDMMMYY Expiry String to JavaScript Date objects for perfect chronological evaluation
+        // HELPER: Map Deribit DDMMMYY Expiry String to JavaScript Date objects for chronological evaluation
         function parseExpiryToDate(expiryStr) {
             const match = expiryStr.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/);
             if (!match) return new Date(0);
@@ -130,7 +133,7 @@
         function parseRawJsonLines(rawText) {
             const lines = rawText.split('\n');
             const records = [];
-            rawFetchedRfqs = []; // Reset backup reference
+            rawFetchedRfqs = []; 
 
             lines.forEach(line => {
                 if (!line.trim()) return;
@@ -166,6 +169,7 @@
                 
                 (rfq.legs || []).forEach(leg => {
                     const inst = leg.instrument_name || "";
+                    // FIXED REGEX CONST TRUNCATING EXTRA SLASH FROM TYPO
                     const regex = new RegExp(`^${assetTicker}-([0-9A-Z]+)-(\\d+)-([CP])$`);
                     const match = inst.match(regex);
                     
@@ -188,7 +192,6 @@
             return records;
         }
 
-        // UPDATED: Sorts Expiries Chronologically (Soonest to Furthest)
         function updateExpiryFilterDropdown() {
             const select = document.getElementById('expiryFilter');
             const preservedSelectedValue = select.value;
@@ -267,7 +270,7 @@
             const cutOffTimestamp = Date.now() - (lookbackDays * 24 * 60 * 60 * 1000);
             
             let parsedRecordsAccumulator = [];
-            rawFetchedRfqs = []; // Flush previous data arrays
+            rawFetchedRfqs = []; 
             let continuationToken = "";
             let keepLooping = true;
             let cycleCount = 1;
@@ -295,7 +298,6 @@
                         break;
                     }
 
-                    // Save raw objects to allow JSONL download mapping later
                     rawFetchedRfqs = rawFetchedRfqs.concat(rawRfqs);
 
                     const batchMapped = parseBlockRfqTradesArray(rawRfqs, selectedAsset);
@@ -349,16 +351,13 @@
             }
         }
 
-        // NEW FEATURE: DATA EXPORT PIPELINE TO LOCAL JSONL FILE
         function downloadDatasetAsJsonl() {
             if (rawFetchedRfqs.length === 0) {
                 alert("No active internal records in volatile memory arrays to export.");
                 return;
             }
 
-            // Map dataset rows cleanly to string lines ending with standard newlines (\n)
             const jsonlContent = rawFetchedRfqs.map(rfq => JSON.stringify(rfq)).join('\n') + '\n';
-            
             const blob = new Blob([jsonlContent], { type: 'application/x-jsonlines;charset=utf-8;' });
             const link = document.createElement("a");
             const dateStr = new Date().toISOString().split('T')[0];
@@ -370,7 +369,7 @@
             document.body.removeChild(link);
         }
 
-        // 3. CHART INTERACTION ENGINE
+        // 3. CHART INTERACTION ENGINE (WITH CHRONOLOGICAL HOVER TOOLTIP BREAKDOWN EXPIRES)
         function renderChart() {
             const filterValue = document.getElementById('expiryFilter').value;
             const scopeData = filterValue === 'All' 
@@ -442,6 +441,7 @@
                             bodyFont: { size: 13 },
                             titleFont: { size: 14, weight: 'bold' },
                             callbacks: {
+                                // ENHANCED HOVER INTERACTION FOR CHRONOLOGICAL DATES EXPIRY DEEP BREAKDOWNS
                                 label: function(context) {
                                     const strike = parseInt(context.label);
                                     const cat = context.dataset.label;
@@ -450,14 +450,20 @@
                                     if (matches.length === 0) return null;
 
                                     const categoryTotal = matches.reduce((acc, curr) => acc + curr.volume, 0);
-                                    const outputLines = [` • ${cat}: Total ${categoryTotal.toFixed(1)}`];
+                                    const outputLines = [` • ${cat}: Total ${categoryTotal.toFixed(1)} consist of:`];
 
                                     const breakdownMap = {};
                                     matches.forEach(m => {
                                         breakdownMap[m.expiry] = (breakdownMap[m.expiry] || 0) + m.volume;
                                     });
 
-                                    Object.entries(breakdownMap).forEach(([expiry, vol]) => {
+                                    // SORT NESTED SUbelements CHRONOLOGICALLY BY DATE NOW TO LATER
+                                    const sortedExpiries = Object.keys(breakdownMap).sort((a, b) => {
+                                        return parseExpiryToDate(a) - parseExpiryToDate(b);
+                                    });
+
+                                    sortedExpiries.forEach(expiry => {
+                                        const vol = breakdownMap[expiry];
                                         outputLines.push(`   ↳ ${vol.toFixed(1)} (${expiry})`);
                                     });
 
