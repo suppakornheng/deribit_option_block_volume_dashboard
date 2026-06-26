@@ -116,7 +116,7 @@
         let selectedAsset = 'BTC'; 
         let isFetchingApi = false;
 
-        // HELPER: Map Deribit DDMMMYY Expiry String to JavaScript Date objects for chronological evaluation
+        // HELPER: Map Deribit DDMMMYY Expiry String to JavaScript Date objects using UTC boundaries
         function parseExpiryToDate(expiryStr) {
             const match = expiryStr.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/);
             if (!match) return new Date(0);
@@ -126,7 +126,16 @@
             const month = months[match[2]] || 0;
             const year = 2000 + parseInt(match[3]);
             
-            return new Date(year, month, day);
+            // OPTIONSET SPEC: Explicitly anchor contract expiration logic at 08:00:00 UTC
+            const expiryUtc = new Date(Date.UTC(year, month, day, 8, 0, 0));
+            return expiryUtc;
+        }
+
+        // HELPER: Check if a contract expiry has already passed compared to current UTC epoch
+        function isContractExpired(expiryStr) {
+            const expiryTime = parseExpiryToDate(expiryStr).getTime();
+            const currentTime = Date.now(); 
+            return expiryTime < currentTime;
         }
 
         // 1. DATA PARSING CORE LOGIC (JSONL Ingestion Engine)
@@ -147,8 +156,13 @@
                         const match = inst.match(/(BTC|ETH)-([0-9A-Z]+)-(\d+)-([CP])$/);
                         
                         if (match) {
+                            const expiry = match[2];
+                            
+                            // SKIP IF CONTRACT ALREADY EXPIRED (PAST 8:00 UTC)
+                            if (isContractExpired(expiry)) return;
+
                             records.push({
-                                expiry: match[2],
+                                expiry: expiry,
                                 strike: parseInt(match[3]),
                                 category: `${match[4] === 'C' ? 'Call' : 'Put'} ${(leg.direction || "buy").toLowerCase().charAt(0).toUpperCase() + (leg.direction || "buy").toLowerCase().slice(1)} Blocked`,
                                 volume: parseFloat(amount * (leg.ratio || 1))
@@ -169,12 +183,15 @@
                 
                 (rfq.legs || []).forEach(leg => {
                     const inst = leg.instrument_name || "";
-                    // FIXED REGEX CONST TRUNCATING EXTRA SLASH FROM TYPO
                     const regex = new RegExp(`^${assetTicker}-([0-9A-Z]+)-(\\d+)-([CP])$`);
                     const match = inst.match(regex);
                     
                     if (match) {
                         const expiry = match[1];
+
+                        // SKIP IF CONTRACT ALREADY EXPIRED (PAST 8:00 UTC)
+                        if (isContractExpired(expiry)) return;
+
                         const strike = parseInt(match[2]);
                         const type = match[3] === 'C' ? 'Call' : 'Put';
                         const direction = (leg.direction || "buy").toLowerCase();
@@ -304,7 +321,7 @@
                     parsedRecordsAccumulator = parsedRecordsAccumulator.concat(batchMapped);
                     
                     const oldestRecordInBatch = rawRfqs[rawRfqs.length - 1];
-                    countTxt.innerText = `${parsedRecordsAccumulator.length} parsed leg records`;
+                    countTxt.innerText = `${parsedRecordsAccumulator.length} active leg records`;
 
                     const spanDistance = Date.now() - cutOffTimestamp;
                     const deltaDistance = Date.now() - oldestRecordInBatch.timestamp;
@@ -330,7 +347,7 @@
                 }
 
                 if (parsedRecordsAccumulator.length === 0) {
-                    alert("No valid underlying matching options trades parsed inside specified scope windows.");
+                    alert("No valid unexpired options trades parsed inside specified scope windows.");
                 } else {
                     globalDataset = parsedRecordsAccumulator;
                     updateExpiryFilterDropdown();
@@ -369,7 +386,7 @@
             document.body.removeChild(link);
         }
 
-        // 3. CHART INTERACTION ENGINE (WITH CHRONOLOGICAL HOVER TOOLTIP BREAKDOWN EXPIRES)
+        // 3. CHART INTERACTION ENGINE
         function renderChart() {
             const filterValue = document.getElementById('expiryFilter').value;
             const scopeData = filterValue === 'All' 
@@ -441,7 +458,6 @@
                             bodyFont: { size: 13 },
                             titleFont: { size: 14, weight: 'bold' },
                             callbacks: {
-                                // ENHANCED HOVER INTERACTION FOR CHRONOLOGICAL DATES EXPIRY DEEP BREAKDOWNS
                                 label: function(context) {
                                     const strike = parseInt(context.label);
                                     const cat = context.dataset.label;
@@ -457,7 +473,6 @@
                                         breakdownMap[m.expiry] = (breakdownMap[m.expiry] || 0) + m.volume;
                                     });
 
-                                    // SORT NESTED SUbelements CHRONOLOGICALLY BY DATE NOW TO LATER
                                     const sortedExpiries = Object.keys(breakdownMap).sort((a, b) => {
                                         return parseExpiryToDate(a) - parseExpiryToDate(b);
                                     });
