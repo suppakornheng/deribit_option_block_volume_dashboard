@@ -400,6 +400,17 @@
                 "Put Buy Blocked": "#bcbd22", "Put Sell Blocked": "#1f77b4"
             };
 
+            // SURGICAL CHANGE: Calculate absolute maximum volume across all expiries to lock the X-axis limits
+            let maxGlobalVolume = 0;
+            sortedUniqueStrikes.forEach(strike => {
+                categories.forEach(cat => {
+                    const matches = globalDataset.filter(d => d.strike === strike && d.category === cat);
+                    const sum = matches.reduce((acc, curr) => acc + curr.volume, 0);
+                    if (sum > maxGlobalVolume) maxGlobalVolume = sum;
+                });
+            });
+            const xAxisLimit = maxGlobalVolume * 1.05 || 10; // 5% padding cushion
+
             const datasets = categories.map(cat => {
                 const isCall = cat.startsWith("Call");
                 
@@ -435,6 +446,9 @@
                     maintainAspectRatio: false,
                     scales: {
                         x: {
+                            // SURGICAL CHANGE: Explicitly clamp boundaries to the max profile size
+                            min: -xAxisLimit,
+                            max: xAxisLimit,
                             grid: { color: '#161b22' },
                             ticks: { color: '#8b949e', callback: val => Math.abs(val) }
                         },
