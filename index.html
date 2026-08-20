@@ -91,6 +91,10 @@
                     <select id="expiryFilter" class="bg-gray-900 border border-gray-700 text-white rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500 cursor-pointer" onchange="renderChartAndTable()">
                         <option value="All">All Expiries</option>
                     </select>
+                    <label class="ml-3 text-xs text-gray-400 inline-flex items-center cursor-pointer">
+                        <input id="queryOnLandingChk" type="checkbox" class="mr-2" onchange="toggleQueryOnLanding(this.checked)" />
+                        Query prices on landing
+                    </label>
                 </div>
                 <button onclick="downloadDatasetAsJsonl()" class="text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded shadow transition-colors flex items-center gap-1">
                     💾 Export JSONL

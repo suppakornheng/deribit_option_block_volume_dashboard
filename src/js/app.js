@@ -3,6 +3,12 @@ let rawFetchedRfqs = [];
 let chartInstance = null;
 let selectedAsset = 'BTC';
 let isFetchingApi = false;
+// user preference: whether to query prices on landing (All expiries)
+// Default to true unless user explicitly set it to '0'
+let queryOnLanding = true;
+try { const q = localStorage.getItem('queryOnLanding'); if (q === '1') queryOnLanding = true; else if (q === '0') queryOnLanding = false; } catch(e){}
+// timers for retrying failed price lookups (instrument -> timerId)
+const priceRetryTimers = {};
 
 // HELPER: Map Deribit DDMMMYY Expiry String to JavaScript Date objects using UTC boundaries
 function parseExpiryToDate(expiryStr) {
@@ -123,6 +129,17 @@ function swapScreenToDashboard() {
     const dash = document.getElementById('dashboardScreen');
     dash.classList.remove('hidden');
     setTimeout(() => dash.classList.remove('opacity-0'), 50);
+    // initialize query-on-landing checkbox to reflect current preference
+    try {
+        const chk = document.getElementById('queryOnLandingChk');
+        if (chk) chk.checked = !!queryOnLanding;
+    } catch (e) {}
+
+    // Default to newest-first by timestamp on initial dashboard landing
+    if (strategiesSort.by === 'id') {
+        strategiesSort.by = 'timestampMsec';
+        strategiesSort.dir = -1;
+    }
 }
 
 function appendApiLog(msg) {
@@ -429,7 +446,7 @@ try {
     }
 } catch (e) { console.warn('priceCache load failed', e); }
 
-function processAndRenderPositions() {
+function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = null) {
     parsedStrategies = [];
 
     rawFetchedRfqs.forEach((rfq, idx) => {
@@ -474,29 +491,72 @@ function processAndRenderPositions() {
         });
     });
 
-    // gather instruments and fetch current prices
-    const instruments = [...new Set(parsedStrategies.flatMap(s => s.legs.map(l => l.instrument)))];
+    if (!fetchPrices) {
+        // Do not query prices — render with null currentPrice/pnl
+        parsedStrategies.forEach(s => { s.legs.forEach(l => { l.currentPrice = null; l.pnl = null; }); s.pnl = null; });
+        renderStrategiesTable();
+        return;
+    }
+
+    // Render an initial table immediately (prices will populate when fetch completes)
+    renderStrategiesTable();
+
+    // gather instruments optionally filtered by expiry
+    const instruments = [...new Set(parsedStrategies.flatMap(s => s.legs.filter(l => {
+        if (!expiryFilterForFetch) return true;
+        return l.expiry === expiryFilterForFetch;
+    }).map(l => l.instrument)))];
+
     fetchCurrentPricesForInstruments(instruments).then(priceMap => {
         parsedStrategies.forEach(strategy => {
             let strategyPnl = 0;
             let hasPrice = false;
             strategy.legs.forEach(leg => {
-                    const cp = priceMap[leg.instrument];
-                    leg.currentPrice = cp != null ? cp : null;
-                    if (leg.currentPrice != null) hasPrice = true;
-                    if (leg.currentPrice != null && leg.entryPrice != null) {
-                        const diff = (leg.currentPrice - leg.entryPrice);
-                        const legPnl = diff * leg.size * (leg.side === 'buy' ? 1 : -1);
-                        leg.pnl = legPnl;
-                        strategyPnl += legPnl;
-                    } else {
-                        leg.pnl = null;
-                    }
-                });
-            strategy.pnl = hasPrice ? strategyPnl : null;
+                // only set price/pnl if we fetched this instrument (or if fetch was for all)
+                const cp = priceMap[leg.instrument];
+                if (cp != null) {
+                    leg.currentPrice = cp;
+                }
+                if (leg.currentPrice != null) hasPrice = true;
+                if (leg.currentPrice != null && leg.entryPrice != null) {
+                    const diff = (leg.currentPrice - leg.entryPrice);
+                    const legPnl = diff * leg.size * (leg.side === 'buy' ? 1 : -1);
+                    leg.pnl = legPnl;
+                    strategyPnl += legPnl;
+                } else {
+                    // leave existing pnl null if no price
+                    leg.pnl = leg.pnl || null;
+                }
+            });
+            strategy.pnl = hasPrice ? strategyPnl : (strategy.pnl || null);
         });
 
         renderStrategiesTable();
+
+        // if some instruments failed to return prices, schedule retries after 35s
+        const failed = instruments.filter(inst => !(inst in priceMap) || priceMap[inst] == null);
+        if (failed.length > 0) {
+            failed.forEach(inst => {
+                // avoid scheduling duplicate retry timers
+                if (priceRetryTimers[inst]) return;
+                // schedule a single retry for this instrument after 35 seconds
+                const tid = setTimeout(async () => {
+                    try {
+                        const pm = await fetchCurrentPricesForInstruments([inst]);
+                        if (pm && pm[inst] != null) {
+                            // we got a price on retry; re-render table to show updates
+                            renderStrategiesTable();
+                        }
+                    } catch (e) {
+                        console.warn('retry fetch failed for', inst, e);
+                    } finally {
+                        try { clearTimeout(priceRetryTimers[inst]); } catch (e) {}
+                        delete priceRetryTimers[inst];
+                    }
+                }, 65000);
+                priceRetryTimers[inst] = tid;
+            });
+        }
     }).catch(err => {
         console.error('Price fetch error', err);
         renderStrategiesTable();
@@ -514,8 +574,20 @@ function setStrategiesSort(by) {
 }
 
 function renderChartAndTable() {
+    const expiry = document.getElementById('expiryFilter').value;
     renderChart();
-    renderStrategiesTable();
+    if (expiry && expiry !== 'All') {
+        // Fetch prices only for selected expiry
+        processAndRenderPositions(true, expiry);
+    } else {
+        // Depending on user preference, optionally fetch on landing
+        processAndRenderPositions(queryOnLanding, null);
+    }
+}
+
+function toggleQueryOnLanding(val) {
+    queryOnLanding = !!val;
+    try { localStorage.setItem('queryOnLanding', queryOnLanding ? '1' : '0'); } catch(e){}
 }
 
 async function fetchCurrentPricesForInstruments(instruments) {
@@ -592,7 +664,6 @@ function renderStrategiesTable() {
     header.innerHTML = `
         <div>RFQ</div>
         <div>Entry Date</div>
-        <div>Amount</div>
         <div>Legs</div>
         <div style="text-align:center">Total Contracts</div>
         <div style="text-align:center">Net Entry</div>
@@ -602,11 +673,11 @@ function renderStrategiesTable() {
     // attach sorting handlers to header labels where appropriate
     header.querySelector('div:nth-child(1)').onclick = () => setStrategiesSort('id');
     header.querySelector('div:nth-child(2)').onclick = () => setStrategiesSort('timestampMsec');
-    header.querySelector('div:nth-child(3)').onclick = () => setStrategiesSort('amount');
-    header.querySelector('div:nth-child(5)').onclick = () => setStrategiesSort('netSize');
-    header.querySelector('div:nth-child(6)').onclick = () => setStrategiesSort('netEntry');
-    header.querySelector('div:nth-child(7)').onclick = () => setStrategiesSort('netCurrent');
-    header.querySelector('div:nth-child(8)').onclick = () => setStrategiesSort('pnl');
+    header.querySelector('div:nth-child(3)').onclick = () => setStrategiesSort('legCount');
+    header.querySelector('div:nth-child(4)').onclick = () => setStrategiesSort('netSize');
+    header.querySelector('div:nth-child(5)').onclick = () => setStrategiesSort('netEntry');
+    header.querySelector('div:nth-child(6)').onclick = () => setStrategiesSort('netCurrent');
+    header.querySelector('div:nth-child(7)').onclick = () => setStrategiesSort('pnl');
 
     container.appendChild(header);
 
@@ -623,10 +694,11 @@ function renderStrategiesTable() {
         const netCurrent = s.legs.reduce((sum, l) => sum + ((l.currentPrice != null ? l.currentPrice : 0) * l.size * (l.side === 'buy' ? 1 : -1)), 0);
         const pnl = s.legs.reduce((sum, l) => sum + (l.pnl || 0), 0);
         const netSize = s.legs.reduce((sum, l) => sum + Math.abs(l.size || 0), 0);
+        const legCount = s.legs.length;
         const firstExpiryRaw = s.legs[0]?.expiry || '';
         const firstExpiry = firstExpiryRaw ? parseExpiryToDate(firstExpiryRaw).getTime() : 0;
         const timestampMsec = s.timestamp || 0;
-        return Object.assign({}, s, { netEntry, netCurrent, pnl, netSize, firstExpiry, firstExpiryLabel: firstExpiryRaw, timestampMsec });
+        return Object.assign({}, s, { netEntry, netCurrent, pnl, netSize, legCount, firstExpiry, firstExpiryLabel: firstExpiryRaw, timestampMsec });
     });
 
     const key = strategiesSort.by;
@@ -638,6 +710,13 @@ function renderStrategiesTable() {
         return (va - vb) * dir;
     });
 
+    // summary row: totals (computed from filtered/sorted view)
+    const totalSummary = document.createElement('div'); totalSummary.className = 'text-sm text-gray-300 mb-2';
+    const totalContractsSum = toRender.reduce((s, r) => s + (Number(r.netSize) || 0), 0);
+    const totalPnlSum = toRender.reduce((s, r) => s + (Number(r.pnl) || 0), 0);
+    totalSummary.innerHTML = `<strong>Total Contracts:</strong> ${Number(totalContractsSum).toFixed(2)} &nbsp; <strong>Total P&L:</strong> ${Number(totalPnlSum).toFixed(4)}`;
+    container.insertBefore(totalSummary, header);
+
     // render each strategy as a card with a legs sub-table and a full-width payoff chart below
     toRender.forEach(strategy => {
         const card = document.createElement('div'); card.className = 'strategy-card';
@@ -646,23 +725,24 @@ function renderStrategiesTable() {
 
         const colRFQ = document.createElement('div'); colRFQ.className = 'col-rfq'; colRFQ.innerText = strategy.id;
         const colDate = document.createElement('div'); colDate.className = 'col-date'; colDate.innerText = strategy.timestamp ? new Date(strategy.timestamp + (7*60*60*1000)).toISOString().replace('T',' ').split('.')[0] : '-';
-        const colAmount = document.createElement('div'); colAmount.className = 'col-amount'; colAmount.innerText = strategy.amount != null ? Number(strategy.amount).toFixed(2) : '-';
+        // Amount column removed (duplicate of Total Contracts)
 
         const colLegs = document.createElement('div'); colLegs.className = 'col-legs';
         const legsTable = document.createElement('table'); legsTable.className = 'card-legs-table';
-        const ltHead = document.createElement('thead'); ltHead.innerHTML = '<tr><th>Side</th><th>Type</th><th>Strike</th><th>LegAmt</th><th>Entry</th><th>Current</th><th>PnL</th></tr>';
+        const ltHead = document.createElement('thead'); ltHead.innerHTML = '<tr><th>Side</th><th>Type</th><th>Expiry</th><th>Strike</th><th>LegAmt</th><th>Entry</th><th>Current</th><th>PnL</th></tr>';
         const ltBody = document.createElement('tbody');
         strategy.legs.forEach(l => {
             const tr = document.createElement('tr');
             const tdSide = document.createElement('td'); tdSide.innerText = l.side.toUpperCase();
             const tdType = document.createElement('td'); tdType.innerText = l.type;
+            const tdExpiry = document.createElement('td'); tdExpiry.innerText = l.expiry || '-';
             const tdStrike = document.createElement('td'); tdStrike.innerText = l.strike;
             const tdAmt = document.createElement('td'); tdAmt.innerText = Number(l.size).toFixed(2);
             const tdEntry = document.createElement('td'); tdEntry.innerText = l.entryPrice != null ? l.entryPrice.toFixed(4) : '-';
             const tdCurrent = document.createElement('td'); tdCurrent.innerText = l.currentPrice != null ? l.currentPrice.toFixed(4) : '-';
             const tdPnl = document.createElement('td'); tdPnl.innerText = l.pnl != null ? l.pnl.toFixed(4) : '-';
             if (l.pnl != null) tdPnl.className = l.pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
-            tr.appendChild(tdSide); tr.appendChild(tdType); tr.appendChild(tdStrike); tr.appendChild(tdAmt); tr.appendChild(tdEntry); tr.appendChild(tdCurrent); tr.appendChild(tdPnl);
+            tr.appendChild(tdSide); tr.appendChild(tdType); tr.appendChild(tdExpiry); tr.appendChild(tdStrike); tr.appendChild(tdAmt); tr.appendChild(tdEntry); tr.appendChild(tdCurrent); tr.appendChild(tdPnl);
             ltBody.appendChild(tr);
         });
         legsTable.appendChild(ltHead); legsTable.appendChild(ltBody);
@@ -673,7 +753,7 @@ function renderStrategiesTable() {
         const colNetCurrent = document.createElement('div'); colNetCurrent.className = 'col-netcurrent'; colNetCurrent.innerText = (strategy.netCurrent != null) ? strategy.netCurrent.toFixed(4) : '-';
         const colPnl = document.createElement('div'); colPnl.className = 'col-pnl'; colPnl.innerText = (strategy.pnl != null) ? strategy.pnl.toFixed(4) : '-'; if (strategy.pnl != null) colPnl.classList.add(strategy.pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
 
-        top.appendChild(colRFQ); top.appendChild(colDate); top.appendChild(colAmount); top.appendChild(colLegs); top.appendChild(colNetSize); top.appendChild(colNetEntry); top.appendChild(colNetCurrent); top.appendChild(colPnl);
+        top.appendChild(colRFQ); top.appendChild(colDate); top.appendChild(colLegs); top.appendChild(colNetSize); top.appendChild(colNetEntry); top.appendChild(colNetCurrent); top.appendChild(colPnl);
 
         const payoffRow = document.createElement('div'); payoffRow.className = 'payoff-row';
         const canvas = document.createElement('canvas'); canvas.id = `payoff_full_${strategy.id}`;
@@ -694,8 +774,8 @@ function renderPayoffMiniChart(strategy, canvas) {
         const strikes = strategy.legs.map(l => l.strike);
         const Kmin = Math.min(...strikes);
         const Kmax = Math.max(...strikes);
-        const start = Math.max(0, Math.round(Kmin * 0.6));
-        const end = Math.round(Kmax * 1.6) || (Kmax + 10);
+        const start = Math.max(0, Kmin - 10000);
+        const end = Kmax + 10000;
         const steps = 50;
         const step = Math.max(1, Math.round((end - start) / steps));
         const labels = [];
@@ -721,7 +801,30 @@ function renderPayoffMiniChart(strategy, canvas) {
                 { data: zeroData, borderColor: '#9ca3af', borderWidth: 1, pointRadius: 0, borderDash: [4,4], fill: false, tension: 0, order: 0 },
                 { data, borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, fill: true, backgroundColor: 'rgba(96,165,250,0.08)', order: 1 }
             ] },
-            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { display: false } } }
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        enabled: true,
+                        callbacks: {
+                            title: (items) => {
+                                // Chart.js provides label in items[0].label as underlying price
+                                return `Price: ${items[0]?.label}`;
+                            },
+                            label: (context) => {
+                                const y = context.parsed && context.parsed.y != null ? context.parsed.y : context.raw;
+                                return `P&L: ${Number(y).toFixed(6)}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { display: true, title: { display: true, text: 'Underlying Price', color: '#9ca3af' } },
+                    y: { display: true, title: { display: true, text: 'P&L', color: '#9ca3af' } }
+                }
+            }
         });
     } catch (e) {
         console.warn('mini chart failed', e);
