@@ -1,0 +1,6 @@
+/* Project styles extracted from index.html */
+body { background-color: #0d1117; color: #c9d1d9; }
+* { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+/* Small helpers */
+.hidden { display: none !important; }
