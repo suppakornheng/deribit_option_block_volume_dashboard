@@ -4,3 +4,51 @@ body { background-color: #0d1117; color: #c9d1d9; }
 
 /* Small helpers */
 .hidden { display: none !important; }
+
+/* P&L coloring */
+.pnl-positive { color: #16a34a; font-weight: 600; }
+.pnl-negative { color: #ef4444; font-weight: 600; }
+
+/* Sortable headers */
+.sortable { cursor: pointer; }
+.sort-indicator { display:inline-block; width:10px; text-align:center; color:#9ca3af; }
+
+/* Make parsed positions table header sticky within its scroll container */
+#positionsTable table thead th {
+	position: sticky;
+	top: 0;
+	background: rgba(17,24,39,0.95);
+	z-index: 5;
+}
+
+/* sticky header for card layout */
+#positionsTable .cards-header {
+	position: sticky;
+	top: 0;
+	background: rgba(17,24,39,0.95);
+	z-index: 6;
+	padding: 0.5rem 0.75rem;
+	border-bottom: 1px solid rgba(148,163,184,0.06);
+}
+
+/* card layout for each parsed strategy */
+.strategy-card { background: rgba(2,6,23,0.45); border: 1px solid rgba(148,163,184,0.04); padding: 0.75rem; margin-bottom: 0.75rem; border-radius: 0.5rem; }
+.strategy-card .card-top { display: grid; grid-template-columns: min-content min-content min-content 1fr min-content min-content min-content min-content; gap: 0.75rem; align-items: start; }
+.strategy-card .card-legs-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.strategy-card .card-legs-table td, .strategy-card .card-legs-table th { padding: 3px 6px; border-bottom: 1px dashed rgba(148,163,184,0.03); }
+.strategy-card .payoff-row { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed rgba(148,163,184,0.03); }
+
+/* Ensure payoff canvases and chart area have comfortable sizing */
+.dashboard-chart { height: 64vh !important; }
+/* let the positions list flow naturally with the page (no inner scroll) */
+#positionsTable { max-height: 520px; overflow: auto; }
+
+/* prevent numeric/label columns from wrapping; allow legs to expand */
+.card-top > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-top .col-legs { white-space: normal; overflow: visible; }
+.card-top .col-amount, .card-top .col-netsize, .card-top .col-netentry, .card-top .col-netcurrent, .card-top .col-pnl, .card-top .col-rfq, .card-top .col-date { padding: 0.25rem 0.5rem; }
+.card-top .col-pnl { min-width: 5.5rem; text-align: center; }
+
+/* header uses same grid template so columns align */
+#positionsTable .cards-header { display: grid; grid-template-columns: min-content min-content min-content 1fr min-content min-content min-content min-content; gap: 0.75rem; align-items: center; }
+#positionsTable .cards-header > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0.5rem 0.75rem; }

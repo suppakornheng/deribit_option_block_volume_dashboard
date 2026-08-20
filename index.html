@@ -88,12 +88,15 @@
             <div class="flex items-center gap-3">
                 <div>
                     <label class="text-xs text-gray-400 mr-2 uppercase tracking-wider">Expiry:</label>
-                    <select id="expiryFilter" class="bg-gray-900 border border-gray-700 text-white rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500 cursor-pointer" onchange="renderChart()">
+                    <select id="expiryFilter" class="bg-gray-900 border border-gray-700 text-white rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500 cursor-pointer" onchange="renderChartAndTable()">
                         <option value="All">All Expiries</option>
                     </select>
                 </div>
                 <button onclick="downloadDatasetAsJsonl()" class="text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded shadow transition-colors flex items-center gap-1">
                     💾 Export JSONL
+                </button>
+                <button onclick="exportStrategiesCSV()" class="text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded shadow transition-colors flex items-center gap-1">
+                    📄 Export CSV
                 </button>
                 <button onclick="stopAndDisconnectDashboard()" class="text-xs bg-gray-800 border border-gray-700 text-gray-300 px-3 py-2 rounded hover:bg-gray-700 transition-colors">
                     Back
@@ -101,8 +104,16 @@
             </div>
         </div>
 
-        <div class="relative w-full bg-gray-900/40 p-4 border border-gray-800 rounded-xl" style="height: 78vh;">
+        <div class="relative w-full bg-gray-900/40 p-4 border border-gray-800 rounded-xl dashboard-chart" style="height: 64vh;">
             <canvas id="optionsChart"></canvas>
+        </div>
+
+        <!-- Positions Table -->
+        <div id="positionsTableContainer" class="mt-6 bg-gray-900/30 border border-gray-800 rounded-xl p-4">
+            <h2 class="text-sm font-bold text-white mb-3">Parsed Positions</h2>
+            <div id="positionsTable" class="text-sm text-gray-300 overflow-visible">
+                <!-- Filled dynamically -->
+            </div>
         </div>
     </div>
 
