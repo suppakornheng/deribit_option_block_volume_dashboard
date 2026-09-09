@@ -55,3 +55,8 @@ body { background-color: #0d1117; color: #c9d1d9; }
 
 /* ensure Entry Date column has a comfortable minimum width */
 .col-date { min-width: 11rem; }
+
+/* Date range modal styles */
+#dateRangeModal { display: none; }
+#dateRangeModal .hidden { display: none !important; }
+#dateRangeModal:not(.hidden) { display: flex; }

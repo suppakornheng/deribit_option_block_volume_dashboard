@@ -9,6 +9,9 @@ let queryOnLanding = true;
 try { const q = localStorage.getItem('queryOnLanding'); if (q === '1') queryOnLanding = true; else if (q === '0') queryOnLanding = false; } catch(e){}
 // timers for retrying failed price lookups (instrument -> timerId)
 const priceRetryTimers = {};
+// date range filter state (YYYY-MM-DD strings)
+let dateFilterFrom = null;
+let dateFilterTo = null;
 
 // HELPER: Map Deribit DDMMMYY Expiry String to JavaScript Date objects using UTC boundaries
 function parseExpiryToDate(expiryStr) {
@@ -437,6 +440,18 @@ const strategiesSort = { by: 'id', dir: 1 };
 // simple in-memory price cache to avoid rate limits
 const priceCache = { store: {}, ttl: 60 * 1000, inflight: {} }; // 60s TTL, inflight dedupe
 
+// historical BTC price cache (persisted) for converting BTC-denominated entry prices to USD
+const btcHistoryCache = { store: {}, ttl: 7 * 24 * 60 * 60 * 1000, inflight: {}, retryTimers: {}, concurrency: 3 };
+
+// hydrate btc history cache from localStorage
+try {
+    const rawB = localStorage.getItem('btcHistoryCacheStore');
+    if (rawB) {
+        const parsedB = JSON.parse(rawB);
+        if (parsedB && typeof parsedB === 'object') btcHistoryCache.store = parsedB;
+    }
+} catch (e) { console.warn('btcHistoryCache load failed', e); }
+
 // hydrate price cache from localStorage so repeated lookups survive reloads
 try {
     const raw = localStorage.getItem('priceCacheStore');
@@ -491,6 +506,9 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
         });
     });
 
+    // attach btcPriceAtEntry (initialize null) for each strategy so UI can display placeholder
+    parsedStrategies.forEach(s => { s.btcPriceAtEntry = null; });
+
     if (!fetchPrices) {
         // Do not query prices — render with null currentPrice/pnl
         parsedStrategies.forEach(s => { s.legs.forEach(l => { l.currentPrice = null; l.pnl = null; }); s.pnl = null; });
@@ -500,6 +518,75 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
 
     // Render an initial table immediately (prices will populate when fetch completes)
     renderStrategiesTable();
+
+    // Always fetch historical BTC prices for strategies' entry dates (user opted in)
+    // Collect unique YYYY-MM-DD dates (UTC) from strategy timestamps
+    const uniqueDates = [...new Set(parsedStrategies.map(s => {
+        if (!s.timestamp) return null;
+        const d = new Date(s.timestamp);
+        return d.toISOString().slice(0,10);
+    }).filter(Boolean))];
+
+    // batch fetch historical BTC prices with limited concurrency
+    const btcDatePromises = [];
+    const semaphore = { running: 0 };
+    function scheduleDateFetch(dateStr) {
+        return new Promise((resolve) => {
+            const attempt = async () => {
+                while (semaphore.running >= btcHistoryCache.concurrency) {
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                semaphore.running++;
+                try {
+                    const price = await fetchHistoricalBtcPriceForDate(dateStr);
+                    resolve({ date: dateStr, price });
+                } catch (e) {
+                    resolve({ date: dateStr, price: null });
+                } finally { semaphore.running--; }
+            };
+            attempt();
+        });
+    }
+
+    uniqueDates.forEach(d => btcDatePromises.push(scheduleDateFetch(d)));
+
+    Promise.all(btcDatePromises).then(results => {
+        const map = {};
+        results.forEach(r => { if (r && r.date) map[r.date] = r.price; });
+        // attach prices to strategies
+        parsedStrategies.forEach(s => {
+            if (!s.timestamp) return;
+            const d = new Date(s.timestamp).toISOString().slice(0,10);
+            s.btcPriceAtEntry = (d in map) ? map[d] : null;
+            // compute per-leg USD entry if btc price available
+            s.legs.forEach(l => {
+                if (s.btcPriceAtEntry != null) l.entryPriceUsd = l.entryPrice * s.btcPriceAtEntry; else l.entryPriceUsd = null;
+            });
+        });
+        // re-run instrument price fetch to compute USD pnl if needed
+        // gather instruments optionally filtered by expiry
+        const instruments2 = [...new Set(parsedStrategies.flatMap(s => s.legs.filter(l => {
+            if (!expiryFilterForFetch) return true; return l.expiry === expiryFilterForFetch;
+        }).map(l => l.instrument)))];
+        fetchCurrentPricesForInstruments(instruments2).then(priceMap2 => {
+            parsedStrategies.forEach(strategy => {
+                let strategyPnl = 0; let hasPrice = false;
+                strategy.legs.forEach(leg => {
+                    const cp = priceMap2[leg.instrument];
+                    if (cp != null) leg.currentPrice = cp;
+                    if (leg.currentPrice != null) hasPrice = true;
+                    if (leg.currentPrice != null && leg.entryPriceUsd != null) {
+                        const diff = (leg.currentPrice - leg.entryPriceUsd);
+                        const legPnl = diff * leg.size * (leg.side === 'buy' ? 1 : -1);
+                        leg.pnl = legPnl;
+                        strategyPnl += legPnl;
+                    }
+                });
+                strategy.pnl = hasPrice ? strategyPnl : (strategy.pnl || null);
+            });
+            renderStrategiesTable();
+        }).catch(e => { console.warn('instrument fetch after btc history failed', e); renderStrategiesTable(); });
+    }).catch(e => { console.warn('btc history fetch failed', e); });
 
     // gather instruments optionally filtered by expiry
     const instruments = [...new Set(parsedStrategies.flatMap(s => s.legs.filter(l => {
@@ -514,19 +601,21 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
             strategy.legs.forEach(leg => {
                 // only set price/pnl if we fetched this instrument (or if fetch was for all)
                 const cp = priceMap[leg.instrument];
-                if (cp != null) {
-                    leg.currentPrice = cp;
-                }
-                if (leg.currentPrice != null) hasPrice = true;
-                if (leg.currentPrice != null && leg.entryPrice != null) {
-                    const diff = (leg.currentPrice - leg.entryPrice);
-                    const legPnl = diff * leg.size * (leg.side === 'buy' ? 1 : -1);
-                    leg.pnl = legPnl;
-                    strategyPnl += legPnl;
-                } else {
-                    // leave existing pnl null if no price
-                    leg.pnl = leg.pnl || null;
-                }
+                        if (cp != null) {
+                            leg.currentPrice = cp;
+                        }
+                        if (leg.currentPrice != null) hasPrice = true;
+                        // prefer USD entry price when available
+                        const entryUsd = (leg.entryPriceUsd != null) ? leg.entryPriceUsd : leg.entryPrice;
+                        if (leg.currentPrice != null && entryUsd != null) {
+                            const diff = (leg.currentPrice - entryUsd);
+                            const legPnl = diff * leg.size * (leg.side === 'buy' ? 1 : -1);
+                            leg.pnl = legPnl;
+                            strategyPnl += legPnl;
+                        } else {
+                            // leave existing pnl null if no price
+                            leg.pnl = leg.pnl || null;
+                        }
             });
             strategy.pnl = hasPrice ? strategyPnl : (strategy.pnl || null);
         });
@@ -553,7 +642,7 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
                         try { clearTimeout(priceRetryTimers[inst]); } catch (e) {}
                         delete priceRetryTimers[inst];
                     }
-                }, 65000);
+                }, 35000);
                 priceRetryTimers[inst] = tid;
             });
         }
@@ -588,6 +677,70 @@ function renderChartAndTable() {
 function toggleQueryOnLanding(val) {
     queryOnLanding = !!val;
     try { localStorage.setItem('queryOnLanding', queryOnLanding ? '1' : '0'); } catch(e){}
+}
+
+// Date range modal handlers and sort shortcuts
+function openDateRangeModal() {
+    const modal = document.getElementById('dateRangeModal');
+    if (!modal) return;
+    // populate inputs with current state
+    try { document.getElementById('dateFrom').value = dateFilterFrom || ''; } catch(e){}
+    try { document.getElementById('dateTo').value = dateFilterTo || ''; } catch(e){}
+    modal.classList.remove('hidden');
+}
+
+function closeDateRangeModal() {
+    const modal = document.getElementById('dateRangeModal'); if (!modal) return; modal.classList.add('hidden');
+}
+
+function applyDateRangeFilter() {
+    const from = document.getElementById('dateFrom')?.value || null;
+    const to = document.getElementById('dateTo')?.value || null;
+    dateFilterFrom = from || null;
+    dateFilterTo = to || null;
+    closeDateRangeModal();
+    renderChartAndTable();
+}
+
+function clearDateRangeFilter() {
+    dateFilterFrom = null; dateFilterTo = null;
+    try { document.getElementById('dateFrom').value = ''; } catch(e){}
+    try { document.getElementById('dateTo').value = ''; } catch(e){}
+    closeDateRangeModal();
+    renderChartAndTable();
+}
+
+function setDateRangeToday() {
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth()+1).padStart(2,'0');
+    const dd = String(today.getDate()).padStart(2,'0');
+    const s = `${yyyy}-${mm}-${dd}`;
+    try { document.getElementById('dateFrom').value = s; } catch(e){}
+    try { document.getElementById('dateTo').value = s; } catch(e){}
+    dateFilterFrom = s; dateFilterTo = s;
+    closeDateRangeModal();
+    renderChartAndTable();
+}
+
+function setDateRangeYesterday() {
+    const today = new Date();
+    today.setUTCDate(today.getUTCDate() - 1);
+    const yyyy = today.getUTCFullYear();
+    const mm = String(today.getUTCMonth()+1).padStart(2,'0');
+    const dd = String(today.getUTCDate()).padStart(2,'0');
+    const s = `${yyyy}-${mm}-${dd}`;
+    try { document.getElementById('dateFrom').value = s; } catch(e){}
+    try { document.getElementById('dateTo').value = s; } catch(e){}
+    dateFilterFrom = s; dateFilterTo = s;
+    closeDateRangeModal();
+    renderChartAndTable();
+}
+
+function setSortShortcut(kind) {
+    if (kind === 'date') { strategiesSort.by = 'timestampMsec'; strategiesSort.dir = -1; }
+    else if (kind === 'contracts') { strategiesSort.by = 'netSize'; strategiesSort.dir = -1; }
+    renderStrategiesTable();
 }
 
 async function fetchCurrentPricesForInstruments(instruments) {
@@ -638,6 +791,90 @@ async function fetchCurrentPricesForInstruments(instruments) {
             }
             return null;
         })();
+// Fetch historical BTC/USD price for a given UTC date string YYYY-MM-DD
+async function fetchHistoricalBtcPriceForDate(yyyy_mm_dd) {
+    if (!yyyy_mm_dd) return null;
+    const now = Date.now();
+    const cached = btcHistoryCache.store[yyyy_mm_dd];
+    if (cached && (now - cached.ts) < btcHistoryCache.ttl) return cached.price;
+
+    // dedupe inflight
+    if (btcHistoryCache.inflight[yyyy_mm_dd]) return btcHistoryCache.inflight[yyyy_mm_dd];
+
+    const promise = (async () => {
+        try {
+            // CoinGecko expects DD-MM-YYYY
+            const parts = yyyy_mm_dd.split('-');
+            const dmy = `${parts[2]}-${parts[1]}-${parts[0]}`;
+            const url = `https://api.coingecko.com/api/v3/coins/bitcoin/history?date=${encodeURIComponent(dmy)}`;
+            const res = await fetch(url, { cache: 'no-store' });
+            if (res.ok) {
+                const payload = await res.json();
+                const price = payload?.market_data?.current_price?.usd;
+                if (price != null) {
+                    btcHistoryCache.store[yyyy_mm_dd] = { price: Number(price), ts: Date.now() };
+                    try { localStorage.setItem('btcHistoryCacheStore', JSON.stringify(btcHistoryCache.store)); } catch (e) {}
+                    return Number(price);
+                }
+            }
+        } catch (err) {
+            console.warn('btc history fetch failed for', yyyy_mm_dd, err);
+        }
+
+        // fallback: try nearest previous day up to 7 days
+        try {
+            for (let i = 1; i <= 7; i++) {
+                const d = new Date(yyyy_mm_dd + 'T00:00:00Z');
+                d.setUTCDate(d.getUTCDate() - i);
+                const fallbackDate = d.toISOString().slice(0,10);
+                const cachedFb = btcHistoryCache.store[fallbackDate];
+                if (cachedFb && (now - cachedFb.ts) < btcHistoryCache.ttl) {
+                    btcHistoryCache.store[yyyy_mm_dd] = { price: cachedFb.price, ts: Date.now() };
+                    try { localStorage.setItem('btcHistoryCacheStore', JSON.stringify(btcHistoryCache.store)); } catch (e) {}
+                    return cachedFb.price;
+                }
+                try {
+                    const parts = fallbackDate.split('-');
+                    const dmy = `${parts[2]}-${parts[1]}-${parts[0]}`;
+                    const url = `https://api.coingecko.com/api/v3/coins/bitcoin/history?date=${encodeURIComponent(dmy)}`;
+                    const res = await fetch(url, { cache: 'no-store' });
+                    if (res.ok) {
+                        const payload = await res.json();
+                        const price = payload?.market_data?.current_price?.usd;
+                        if (price != null) {
+                            btcHistoryCache.store[yyyy_mm_dd] = { price: Number(price), ts: Date.now() };
+                            try { localStorage.setItem('btcHistoryCacheStore', JSON.stringify(btcHistoryCache.store)); } catch (e) {}
+                            return Number(price);
+                        }
+                    }
+                } catch (e) { /* continue */ }
+            }
+        } catch (e) { /* ignore */ }
+
+        // final fallback: use current BTC price simple endpoint
+        try {
+            const curRes = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd', { cache: 'no-store' });
+            if (curRes.ok) {
+                const curPayload = await curRes.json();
+                const cur = curPayload?.bitcoin?.usd;
+                if (cur != null) {
+                    btcHistoryCache.store[yyyy_mm_dd] = { price: Number(cur), ts: Date.now() };
+                    try { localStorage.setItem('btcHistoryCacheStore', JSON.stringify(btcHistoryCache.store)); } catch (e) {}
+                    return Number(cur);
+                }
+            }
+        } catch (e) { /* ignore */ }
+
+        // if all fail, store null to avoid hammering
+        btcHistoryCache.store[yyyy_mm_dd] = { price: null, ts: Date.now() };
+        try { localStorage.setItem('btcHistoryCacheStore', JSON.stringify(btcHistoryCache.store)); } catch (e) {}
+        return null;
+    })();
+
+    btcHistoryCache.inflight[yyyy_mm_dd] = promise;
+    promise.finally(() => { try { delete btcHistoryCache.inflight[yyyy_mm_dd]; } catch (e) {} });
+    return promise;
+}
 
         priceCache.inflight[inst] = p;
         fetchPromises.push(p);
@@ -688,6 +925,24 @@ function renderStrategiesTable() {
         toRender = toRender.filter(s => s.legs.some(l => l.expiry === expiryFilter));
     }
 
+    // apply date range filter if set (date inputs are YYYY-MM-DD)
+    if (dateFilterFrom || dateFilterTo) {
+        let startMs = null; let endMs = null;
+        try {
+            if (dateFilterFrom) startMs = new Date(dateFilterFrom + 'T00:00:00').getTime();
+        } catch(e) { startMs = null; }
+        try {
+            if (dateFilterTo) endMs = new Date(dateFilterTo + 'T23:59:59.999').getTime();
+        } catch(e) { endMs = null; }
+
+        toRender = toRender.filter(s => {
+            const ts = s.timestamp || 0;
+            if (startMs != null && ts < startMs) return false;
+            if (endMs != null && ts > endMs) return false;
+            return true;
+        });
+    }
+
     // compute sort keys and sort
     toRender = toRender.map(s => {
         const netEntry = s.legs.reduce((sum, l) => sum + l.entryPrice * l.size * (l.side === 'buy' ? -1 : 1), 0);
@@ -724,7 +979,14 @@ function renderStrategiesTable() {
         const top = document.createElement('div'); top.className = 'card-top text-sm text-gray-300';
 
         const colRFQ = document.createElement('div'); colRFQ.className = 'col-rfq'; colRFQ.innerText = strategy.id;
-        const colDate = document.createElement('div'); colDate.className = 'col-date'; colDate.innerText = strategy.timestamp ? new Date(strategy.timestamp + (7*60*60*1000)).toISOString().replace('T',' ').split('.')[0] : '-';
+        const colDate = document.createElement('div'); colDate.className = 'col-date';
+        if (strategy.timestamp) {
+            const dt = new Date(strategy.timestamp + (7*60*60*1000)).toISOString().replace('T',' ').split('.')[0];
+            const btcLine = strategy.btcPriceAtEntry != null ? `btc@${Number(strategy.btcPriceAtEntry).toFixed(2)}` : 'btc@-';
+            colDate.innerHTML = `${dt}<br/><span class="text-xs text-gray-500">${btcLine}</span>`;
+        } else {
+            colDate.innerText = '-';
+        }
         // Amount column removed (duplicate of Total Contracts)
 
         const colLegs = document.createElement('div'); colLegs.className = 'col-legs';
@@ -738,7 +1000,7 @@ function renderStrategiesTable() {
             const tdExpiry = document.createElement('td'); tdExpiry.innerText = l.expiry || '-';
             const tdStrike = document.createElement('td'); tdStrike.innerText = l.strike;
             const tdAmt = document.createElement('td'); tdAmt.innerText = Number(l.size).toFixed(2);
-            const tdEntry = document.createElement('td'); tdEntry.innerText = l.entryPrice != null ? l.entryPrice.toFixed(4) : '-';
+            const tdEntry = document.createElement('td'); tdEntry.innerText = l.entryPriceUsd != null ? l.entryPriceUsd.toFixed(4) : (l.entryPrice != null ? l.entryPrice.toFixed(4) : '-');
             const tdCurrent = document.createElement('td'); tdCurrent.innerText = l.currentPrice != null ? l.currentPrice.toFixed(4) : '-';
             const tdPnl = document.createElement('td'); tdPnl.innerText = l.pnl != null ? l.pnl.toFixed(4) : '-';
             if (l.pnl != null) tdPnl.className = l.pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
@@ -786,7 +1048,8 @@ function renderPayoffMiniChart(strategy, canvas) {
             let net = 0;
             strategy.legs.forEach(leg => {
                 const intrinsic = (leg.type === 'Call') ? Math.max(0, S - leg.strike) : Math.max(0, leg.strike - S);
-                const legNet = (leg.side === 'buy') ? (intrinsic - leg.entryPrice) * leg.size : -(intrinsic - leg.entryPrice) * leg.size;
+                const entryUsd = (leg.entryPriceUsd != null) ? leg.entryPriceUsd : leg.entryPrice;
+                const legNet = (leg.side === 'buy') ? (intrinsic - entryUsd) * leg.size : -(intrinsic - entryUsd) * leg.size;
                 net += legNet;
             });
             data.push(net);
