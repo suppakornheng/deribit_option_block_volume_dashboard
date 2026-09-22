@@ -481,6 +481,7 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
             // correct leg sizing: amount divided by sum of ratios, times leg ratio
             const size = Number(amount) / sumRatio * ratio;
             const entryPrice = Number(leg.price || rfq.price || rfq.avg_price || rfq.average_price || leg.premium || 0) || 0;
+            const indexPrice = Number(rfq.index_prices?.btc_usd) || null;
 
             return {
                 instrument: inst,
@@ -491,7 +492,10 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
                 ratio,
                 size,
                 entryPrice,
+                entryIndexPrice: indexPrice,
+                entryPriceUsd: indexPrice != null ? entryPrice * indexPrice : null,
                 currentPrice: null,
+                currentIndexPrice: null,
                 pnl: null
             };
         }).filter(Boolean);
@@ -507,7 +511,10 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
     });
 
     // attach btcPriceAtEntry (initialize null) for each strategy so UI can display placeholder
-    parsedStrategies.forEach(s => { s.btcPriceAtEntry = null; });
+    parsedStrategies.forEach(s => {
+        const entryLeg = s.legs.find(l => l.entryPriceUsd != null);
+        s.btcPriceAtEntry = entryLeg?.entryIndexPrice ?? null;
+    });
 
     if (!fetchPrices) {
         // Do not query prices — render with null currentPrice/pnl
@@ -557,7 +564,7 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
         parsedStrategies.forEach(s => {
             if (!s.timestamp) return;
             const d = new Date(s.timestamp).toISOString().slice(0,10);
-            s.btcPriceAtEntry = (d in map) ? map[d] : null;
+            if (s.btcPriceAtEntry == null) s.btcPriceAtEntry = (d in map) ? map[d] : null;
             // compute per-leg USD entry if btc price available
             s.legs.forEach(l => {
                 if (s.btcPriceAtEntry != null) l.entryPriceUsd = l.entryPrice * s.btcPriceAtEntry; else l.entryPriceUsd = null;
@@ -572,13 +579,16 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
             parsedStrategies.forEach(strategy => {
                 let strategyPnl = 0; let hasPrice = false;
                 strategy.legs.forEach(leg => {
-                    const cp = priceMap2[leg.instrument];
+                    const quote = priceMap2[leg.instrument];
+                    const cp = quote?.price;
                     if (cp != null) leg.currentPrice = cp;
+                    if (quote?.indexPrice != null) leg.currentIndexPrice = quote.indexPrice;
                     if (leg.currentPrice != null) hasPrice = true;
-                    if (leg.currentPrice != null && leg.entryPriceUsd != null) {
-                        const diff = (leg.currentPrice - leg.entryPriceUsd);
+                    if (leg.currentPrice != null && leg.entryPrice != null) {
+                        const diff = (leg.currentPrice - leg.entryPrice);
                         const legPnl = diff * leg.size * (leg.side === 'buy' ? 1 : -1);
                         leg.pnl = legPnl;
+                        leg.pnlUsd = leg.currentIndexPrice != null ? legPnl * leg.currentIndexPrice : null;
                         strategyPnl += legPnl;
                     }
                 });
@@ -600,17 +610,19 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
             let hasPrice = false;
             strategy.legs.forEach(leg => {
                 // only set price/pnl if we fetched this instrument (or if fetch was for all)
-                const cp = priceMap[leg.instrument];
+                const quote = priceMap[leg.instrument];
+                const cp = quote?.price;
                         if (cp != null) {
                             leg.currentPrice = cp;
                         }
+                    if (quote?.indexPrice != null) leg.currentIndexPrice = quote.indexPrice;
                         if (leg.currentPrice != null) hasPrice = true;
                         // prefer USD entry price when available
-                        const entryUsd = (leg.entryPriceUsd != null) ? leg.entryPriceUsd : leg.entryPrice;
-                        if (leg.currentPrice != null && entryUsd != null) {
-                            const diff = (leg.currentPrice - entryUsd);
+                        if (leg.currentPrice != null && leg.entryPrice != null) {
+                            const diff = (leg.currentPrice - leg.entryPrice);
                             const legPnl = diff * leg.size * (leg.side === 'buy' ? 1 : -1);
                             leg.pnl = legPnl;
+                            leg.pnlUsd = leg.currentIndexPrice != null ? legPnl * leg.currentIndexPrice : null;
                             strategyPnl += legPnl;
                         } else {
                             // leave existing pnl null if no price
@@ -752,7 +764,7 @@ async function fetchCurrentPricesForInstruments(instruments) {
     instruments.forEach(inst => {
         const cached = priceCache.store[inst];
         if (cached && (now - cached.ts) < priceCache.ttl) {
-            map[inst] = cached.price;
+            map[inst] = { price: cached.price, indexPrice: cached.indexPrice ?? null };
             return;
         }
 
@@ -778,10 +790,12 @@ async function fetchCurrentPricesForInstruments(instruments) {
                 }
                 if (price != null) {
                     const numP = Number(price);
-                    priceCache.store[inst] = { price: numP, ts: Date.now() };
+                    const indexPrice = Number(r.index_price) || null;
+                    const quote = { price: numP, indexPrice, ts: Date.now() };
+                    priceCache.store[inst] = quote;
                     try { localStorage.setItem('priceCacheStore', JSON.stringify(priceCache.store)); } catch (e) { }
-                    map[inst] = numP;
-                    return numP;
+                    map[inst] = { price: numP, indexPrice };
+                    return map[inst];
                 }
             } catch (e) {
                 console.warn('fetch price failed for', inst, e);
@@ -904,8 +918,10 @@ function renderStrategiesTable() {
         <div>Legs</div>
         <div style="text-align:center">Total Contracts</div>
         <div style="text-align:center">Net Entry</div>
+        <div style="text-align:center">Net Entry (USD)</div>
         <div style="text-align:center">Net Current</div>
         <div style="text-align:center">P&L</div>
+        <div style="text-align:center">P&L (USD)</div>
     `;
     // attach sorting handlers to header labels where appropriate
     header.querySelector('div:nth-child(1)').onclick = () => setStrategiesSort('id');
@@ -913,8 +929,10 @@ function renderStrategiesTable() {
     header.querySelector('div:nth-child(3)').onclick = () => setStrategiesSort('legCount');
     header.querySelector('div:nth-child(4)').onclick = () => setStrategiesSort('netSize');
     header.querySelector('div:nth-child(5)').onclick = () => setStrategiesSort('netEntry');
-    header.querySelector('div:nth-child(6)').onclick = () => setStrategiesSort('netCurrent');
-    header.querySelector('div:nth-child(7)').onclick = () => setStrategiesSort('pnl');
+    header.querySelector('div:nth-child(6)').onclick = () => setStrategiesSort('netEntryUsd');
+    header.querySelector('div:nth-child(7)').onclick = () => setStrategiesSort('netCurrent');
+    header.querySelector('div:nth-child(8)').onclick = () => setStrategiesSort('pnl');
+    header.querySelector('div:nth-child(9)').onclick = () => setStrategiesSort('pnlUsd');
 
     container.appendChild(header);
 
@@ -946,14 +964,16 @@ function renderStrategiesTable() {
     // compute sort keys and sort
     toRender = toRender.map(s => {
         const netEntry = s.legs.reduce((sum, l) => sum + l.entryPrice * l.size * (l.side === 'buy' ? -1 : 1), 0);
+        const netEntryUsd = s.legs.reduce((sum, l) => sum + (l.entryPriceUsd || 0) * l.size * (l.side === 'buy' ? -1 : 1), 0);
         const netCurrent = s.legs.reduce((sum, l) => sum + ((l.currentPrice != null ? l.currentPrice : 0) * l.size * (l.side === 'buy' ? 1 : -1)), 0);
         const pnl = s.legs.reduce((sum, l) => sum + (l.pnl || 0), 0);
+        const pnlUsd = s.legs.reduce((sum, l) => sum + (l.pnlUsd || 0), 0);
         const netSize = s.legs.reduce((sum, l) => sum + Math.abs(l.size || 0), 0);
         const legCount = s.legs.length;
         const firstExpiryRaw = s.legs[0]?.expiry || '';
         const firstExpiry = firstExpiryRaw ? parseExpiryToDate(firstExpiryRaw).getTime() : 0;
         const timestampMsec = s.timestamp || 0;
-        return Object.assign({}, s, { netEntry, netCurrent, pnl, netSize, legCount, firstExpiry, firstExpiryLabel: firstExpiryRaw, timestampMsec });
+        return Object.assign({}, s, { netEntry, netEntryUsd, netCurrent, pnl, pnlUsd, netSize, legCount, firstExpiry, firstExpiryLabel: firstExpiryRaw, timestampMsec });
     });
 
     const key = strategiesSort.by;
@@ -969,7 +989,8 @@ function renderStrategiesTable() {
     const totalSummary = document.createElement('div'); totalSummary.className = 'text-sm text-gray-300 mb-2';
     const totalContractsSum = toRender.reduce((s, r) => s + (Number(r.netSize) || 0), 0);
     const totalPnlSum = toRender.reduce((s, r) => s + (Number(r.pnl) || 0), 0);
-    totalSummary.innerHTML = `<strong>Total Contracts:</strong> ${Number(totalContractsSum).toFixed(2)} &nbsp; <strong>Total P&L:</strong> ${Number(totalPnlSum).toFixed(4)}`;
+    const totalPnlUsdSum = toRender.reduce((s, r) => s + (Number(r.pnlUsd) || 0), 0);
+    totalSummary.innerHTML = `<strong>Total Contracts:</strong> ${Number(totalContractsSum).toFixed(2)} &nbsp; <strong>Total P&L:</strong> ${Number(totalPnlSum).toFixed(4)} &nbsp; <strong>Total P&L (USD):</strong> ${Number(totalPnlUsdSum).toFixed(4)}`;
     container.insertBefore(totalSummary, header);
 
     // render each strategy as a card with a legs sub-table and a full-width payoff chart below
@@ -991,7 +1012,7 @@ function renderStrategiesTable() {
 
         const colLegs = document.createElement('div'); colLegs.className = 'col-legs';
         const legsTable = document.createElement('table'); legsTable.className = 'card-legs-table';
-        const ltHead = document.createElement('thead'); ltHead.innerHTML = '<tr><th>Side</th><th>Type</th><th>Expiry</th><th>Strike</th><th>LegAmt</th><th>Entry</th><th>Current</th><th>PnL</th></tr>';
+        const ltHead = document.createElement('thead'); ltHead.innerHTML = '<tr><th>Side</th><th>Type</th><th>Expiry</th><th>Strike</th><th>LegAmt</th><th>Entry</th><th>Entry (USD)</th><th>Current</th><th>PnL</th><th>P&L (USD)</th></tr>';
         const ltBody = document.createElement('tbody');
         strategy.legs.forEach(l => {
             const tr = document.createElement('tr');
@@ -1000,11 +1021,14 @@ function renderStrategiesTable() {
             const tdExpiry = document.createElement('td'); tdExpiry.innerText = l.expiry || '-';
             const tdStrike = document.createElement('td'); tdStrike.innerText = l.strike;
             const tdAmt = document.createElement('td'); tdAmt.innerText = Number(l.size).toFixed(2);
-            const tdEntry = document.createElement('td'); tdEntry.innerText = l.entryPriceUsd != null ? l.entryPriceUsd.toFixed(4) : (l.entryPrice != null ? l.entryPrice.toFixed(4) : '-');
+            const tdEntry = document.createElement('td'); tdEntry.innerText = l.entryPrice != null ? l.entryPrice.toFixed(4) : '-';
+            const tdEntryUsd = document.createElement('td'); tdEntryUsd.innerText = l.entryPriceUsd != null ? l.entryPriceUsd.toFixed(4) : '-';
             const tdCurrent = document.createElement('td'); tdCurrent.innerText = l.currentPrice != null ? l.currentPrice.toFixed(4) : '-';
             const tdPnl = document.createElement('td'); tdPnl.innerText = l.pnl != null ? l.pnl.toFixed(4) : '-';
+            const tdPnlUsd = document.createElement('td'); tdPnlUsd.innerText = l.pnlUsd != null ? l.pnlUsd.toFixed(4) : '-';
             if (l.pnl != null) tdPnl.className = l.pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
-            tr.appendChild(tdSide); tr.appendChild(tdType); tr.appendChild(tdExpiry); tr.appendChild(tdStrike); tr.appendChild(tdAmt); tr.appendChild(tdEntry); tr.appendChild(tdCurrent); tr.appendChild(tdPnl);
+                if (l.pnlUsd != null) tdPnlUsd.className = l.pnlUsd >= 0 ? 'pnl-positive' : 'pnl-negative';
+                tr.appendChild(tdSide); tr.appendChild(tdType); tr.appendChild(tdExpiry); tr.appendChild(tdStrike); tr.appendChild(tdAmt); tr.appendChild(tdEntry); tr.appendChild(tdEntryUsd); tr.appendChild(tdCurrent); tr.appendChild(tdPnl); tr.appendChild(tdPnlUsd);
             ltBody.appendChild(tr);
         });
         legsTable.appendChild(ltHead); legsTable.appendChild(ltBody);
@@ -1012,10 +1036,12 @@ function renderStrategiesTable() {
 
         const colNetSize = document.createElement('div'); colNetSize.className = 'col-netsize'; colNetSize.style.textAlign = 'center'; colNetSize.innerText = Number(strategy.netSize || 0).toFixed(2);
         const colNetEntry = document.createElement('div'); colNetEntry.className = 'col-netentry'; colNetEntry.innerText = (strategy.netEntry != null) ? strategy.netEntry.toFixed(4) : '-';
+        const colNetEntryUsd = document.createElement('div'); colNetEntryUsd.className = 'col-netentryusd'; colNetEntryUsd.innerText = (strategy.netEntryUsd != null) ? strategy.netEntryUsd.toFixed(4) : '-';
         const colNetCurrent = document.createElement('div'); colNetCurrent.className = 'col-netcurrent'; colNetCurrent.innerText = (strategy.netCurrent != null) ? strategy.netCurrent.toFixed(4) : '-';
         const colPnl = document.createElement('div'); colPnl.className = 'col-pnl'; colPnl.innerText = (strategy.pnl != null) ? strategy.pnl.toFixed(4) : '-'; if (strategy.pnl != null) colPnl.classList.add(strategy.pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
+        const colPnlUsd = document.createElement('div'); colPnlUsd.className = 'col-pnlusd'; colPnlUsd.innerText = (strategy.pnlUsd != null) ? strategy.pnlUsd.toFixed(4) : '-'; if (strategy.pnlUsd != null) colPnlUsd.classList.add(strategy.pnlUsd >= 0 ? 'pnl-positive' : 'pnl-negative');
 
-        top.appendChild(colRFQ); top.appendChild(colDate); top.appendChild(colLegs); top.appendChild(colNetSize); top.appendChild(colNetEntry); top.appendChild(colNetCurrent); top.appendChild(colPnl);
+        top.appendChild(colRFQ); top.appendChild(colDate); top.appendChild(colLegs); top.appendChild(colNetSize); top.appendChild(colNetEntry); top.appendChild(colNetEntryUsd); top.appendChild(colNetCurrent); top.appendChild(colPnl); top.appendChild(colPnlUsd);
 
         const payoffRow = document.createElement('div'); payoffRow.className = 'payoff-row';
         const canvas = document.createElement('canvas'); canvas.id = `payoff_full_${strategy.id}`;
@@ -1067,18 +1093,24 @@ function renderPayoffMiniChart(strategy, canvas) {
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                interaction: {
+                    mode: 'index',
+                    intersect: false
+                },
                 plugins: {
                     legend: { display: false },
                     tooltip: {
                         enabled: true,
+                        mode: 'index',
+                        intersect: false,
                         callbacks: {
                             title: (items) => {
                                 // Chart.js provides label in items[0].label as underlying price
-                                return `Price: ${items[0]?.label}`;
+                                return `X: Price ${items[0]?.label}`;
                             },
                             label: (context) => {
                                 const y = context.parsed && context.parsed.y != null ? context.parsed.y : context.raw;
-                                return `P&L: ${Number(y).toFixed(6)}`;
+                                return `Y: P&L ${Number(y).toFixed(6)}`;
                             }
                         }
                     }
@@ -1110,13 +1142,15 @@ function exportStrategiesCSV() {
 
     toRender = toRender.map(s => {
         const netEntry = s.legs.reduce((sum, l) => sum + l.entryPrice * l.size * (l.side === 'buy' ? -1 : 1), 0);
+        const netEntryUsd = s.legs.reduce((sum, l) => sum + (l.entryPriceUsd || 0) * l.size * (l.side === 'buy' ? -1 : 1), 0);
         const netCurrent = s.legs.reduce((sum, l) => sum + ((l.currentPrice != null ? l.currentPrice : 0) * l.size * (l.side === 'buy' ? 1 : -1)), 0);
         const pnl = s.legs.reduce((sum, l) => sum + (l.pnl || 0), 0);
+        const pnlUsd = s.legs.reduce((sum, l) => sum + (l.pnlUsd || 0), 0);
         const netSize = s.legs.reduce((sum, l) => sum + Math.abs(l.size || 0), 0);
         const firstExpiryRaw = s.legs[0]?.expiry || '';
         const firstExpiry = firstExpiryRaw ? parseExpiryToDate(firstExpiryRaw).getTime() : 0;
         const timestampMsec = s.timestamp || 0;
-        return Object.assign({}, s, { netEntry, netCurrent, pnl, netSize, firstExpiry, firstExpiryLabel: firstExpiryRaw, timestampMsec });
+        return Object.assign({}, s, { netEntry, netEntryUsd, netCurrent, pnl, pnlUsd, netSize, firstExpiry, firstExpiryLabel: firstExpiryRaw, timestampMsec });
     });
 
     const key = strategiesSort.by;
@@ -1130,7 +1164,7 @@ function exportStrategiesCSV() {
 
     // build CSV rows
     const rows = toRender.map(s => {
-        const legsText = s.legs.map(l => `${l.instrument}|${l.strike}|${l.type}|${l.side}|${l.ratio}|${Number(l.size).toFixed(2)}|${l.entryPrice}|${(l.currentPrice!=null?l.currentPrice:'')}|${(l.pnl!=null?l.pnl:'')}`).join(' ; ');
+        const legsText = s.legs.map(l => `${l.instrument}|${l.strike}|${l.type}|${l.side}|${l.ratio}|${Number(l.size).toFixed(2)}|${l.entryPrice}|${(l.entryPriceUsd!=null?l.entryPriceUsd:'')}|${(l.currentPrice!=null?l.currentPrice:'')}|${(l.pnl!=null?l.pnl:'')}|${(l.pnlUsd!=null?l.pnlUsd:'')}`).join(' ; ');
         const dateUtc7 = s.timestamp ? new Date(s.timestamp + (7*60*60*1000)).toISOString().replace('T', ' ').split('.')[0] : '';
         return {
             RFQ: s.id,
@@ -1139,15 +1173,17 @@ function exportStrategiesCSV() {
             Expiry: s.firstExpiryLabel || '',
             NetSize: Number(s.netSize || 0).toFixed(2),
             NetEntry: (s.netEntry != null) ? s.netEntry.toFixed(4) : '',
+            NetEntryUsd: (s.netEntryUsd != null) ? s.netEntryUsd.toFixed(4) : '',
             NetCurrent: (s.netCurrent != null) ? s.netCurrent.toFixed(4) : '',
             PnL: (s.pnl != null) ? s.pnl.toFixed(4) : '',
+            PnLUsd: (s.pnlUsd != null) ? s.pnlUsd.toFixed(4) : '',
             LegCount: s.legs.length,
             Legs: legsText
         };
     });
 
     // CSV header
-    const header = ['RFQ','Date','Timestamp','Expiry','NetSize','NetEntry','NetCurrent','PnL','LegCount','Legs'];
+    const header = ['RFQ','Date','Timestamp','Expiry','NetSize','NetEntry','NetEntryUsd','NetCurrent','PnL','PnLUsd','LegCount','Legs'];
     const escapeCsv = (v) => {
         if (v == null) return '';
         const s = String(v);
