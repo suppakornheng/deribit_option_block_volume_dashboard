@@ -1068,6 +1068,19 @@ function renderPayoffMiniChart(strategy, canvas) {
         const step = Math.max(1, Math.round((end - start) / steps));
         const labels = [];
         const data = [];
+        const legSizes = strategy.legs.map(leg => Math.abs(Number(leg.size) || 0)).filter(Boolean);
+        const decimalPlaces = Math.min(8, Math.max(0, ...legSizes.map(size => {
+            const text = String(size);
+            return text.includes('.') ? text.split('.')[1].length : 0;
+        })));
+        const scale = 10 ** decimalPlaces;
+        const greatestCommonFactor = (left, right) => {
+            while (right) [left, right] = [right, left % right];
+            return left;
+        };
+        const commonSize = legSizes
+            .map(size => Math.round(size * scale))
+            .reduce(greatestCommonFactor, 0) / scale || 1;
 
         for (let S = start; S <= end; S += step) {
             labels.push(S);
@@ -1075,7 +1088,8 @@ function renderPayoffMiniChart(strategy, canvas) {
             strategy.legs.forEach(leg => {
                 const intrinsic = (leg.type === 'Call') ? Math.max(0, S - leg.strike) : Math.max(0, leg.strike - S);
                 const entryUsd = (leg.entryPriceUsd != null) ? leg.entryPriceUsd : leg.entryPrice;
-                const legNet = (leg.side === 'buy') ? (intrinsic - entryUsd) * leg.size : -(intrinsic - entryUsd) * leg.size;
+                const normalizedSize = leg.size / commonSize;
+                const legNet = (leg.side === 'buy') ? (intrinsic - entryUsd) * normalizedSize : -(intrinsic - entryUsd) * normalizedSize;
                 net += legNet;
             });
             data.push(net);
