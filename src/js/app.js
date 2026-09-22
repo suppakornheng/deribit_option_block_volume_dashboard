@@ -165,7 +165,7 @@ function handleFileLoading(event) {
         updateExpiryFilterDropdown();
         swapScreenToDashboard();
         renderChart();
-        processAndRenderPositions();
+        processAndRenderPositions(queryOnLanding, null);
     };
     reader.readAsText(file);
 }
@@ -263,7 +263,7 @@ async function startLiveApiEngine() {
             document.getElementById('liveStatusBadge').classList.remove('hidden');
             swapScreenToDashboard();
             renderChart();
-            processAndRenderPositions();
+            processAndRenderPositions(queryOnLanding, null);
         }
 
     } catch (err) {
@@ -575,6 +575,7 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
         const instruments2 = [...new Set(parsedStrategies.flatMap(s => s.legs.filter(l => {
             if (!expiryFilterForFetch) return true; return l.expiry === expiryFilterForFetch;
         }).map(l => l.instrument)))];
+        instruments2.sort((a, b) => getInstrumentFetchPriority(b) - getInstrumentFetchPriority(a));
         fetchCurrentPricesForInstruments(instruments2).then(priceMap2 => {
             parsedStrategies.forEach(strategy => {
                 let strategyPnl = 0; let hasPrice = false;
@@ -603,6 +604,7 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
         if (!expiryFilterForFetch) return true;
         return l.expiry === expiryFilterForFetch;
     }).map(l => l.instrument)))];
+    instruments.sort((a, b) => getInstrumentFetchPriority(b) - getInstrumentFetchPriority(a));
 
     fetchCurrentPricesForInstruments(instruments).then(priceMap => {
         parsedStrategies.forEach(strategy => {
@@ -753,6 +755,13 @@ function setSortShortcut(kind) {
     if (kind === 'date') { strategiesSort.by = 'timestampMsec'; strategiesSort.dir = -1; }
     else if (kind === 'contracts') { strategiesSort.by = 'netSize'; strategiesSort.dir = -1; }
     renderStrategiesTable();
+}
+
+function getInstrumentFetchPriority(instrument) {
+    return parsedStrategies.reduce((highestAmount, strategy) => {
+        const hasInstrument = strategy.legs.some(leg => leg.instrument === instrument);
+        return hasInstrument ? Math.max(highestAmount, Number(strategy.amount) || 0) : highestAmount;
+    }, 0);
 }
 
 async function fetchCurrentPricesForInstruments(instruments) {
