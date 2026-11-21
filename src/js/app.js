@@ -4,6 +4,10 @@ let chartInstance = null;
 const payoffChartInstances = new Set();
 let selectedAsset = 'BTC';
 let isFetchingApi = false;
+const AUTO_FETCH_MIN_CONTRACTS = 200;
+const PRICE_REQUEST_DELAY_MS = 1000;
+let autoFetchLargeStrategiesStarted = false;
+let autoFetchGeneration = 0;
 // date range filter state (YYYY-MM-DD strings)
 let dateFilterFrom = null;
 let dateFilterTo = null;
@@ -153,6 +157,7 @@ function handleFileLoading(event) {
     const file = event.target.files[0];
     if (!file) return;
 
+    resetAutomaticPriceFetch();
     setUploadStatus(`Reading ${file.name}...`);
     const reader = new FileReader();
     reader.onload = function(e) {
@@ -181,6 +186,7 @@ function handleFileLoading(event) {
 // PIPELINE B: SEQUENTIAL PAGINATION PARSER ENGINE FOR GET_BLOCK_RFQ_TRADES
 async function startLiveApiEngine() {
     if (isFetchingApi) return;
+    resetAutomaticPriceFetch();
     isFetchingApi = true;
 
     const spinner = document.getElementById('apiBtnSpinner');
@@ -450,6 +456,7 @@ let parsedStrategies = [];
 const strategiesSort = { by: 'id', dir: 1 };
 // simple in-memory price cache to avoid rate limits
 const priceCache = { store: {}, ttl: 60 * 1000, inflight: {} }; // 60s TTL, inflight dedupe
+let priceFetchQueue = Promise.resolve();
 
 // hydrate price cache from localStorage so repeated lookups survive reloads
 try {
@@ -516,7 +523,86 @@ function processAndRenderPositions() {
         s.btcPriceAtEntry = entryLeg?.entryIndexPrice ?? null;
     });
 
+    strategiesSort.by = 'netSize';
+    strategiesSort.dir = -1;
     renderStrategiesTable();
+    startAutomaticPriceFetch();
+}
+
+function resetAutomaticPriceFetch() {
+    autoFetchGeneration++;
+    autoFetchLargeStrategiesStarted = false;
+}
+
+function getLargeStrategyPriceQueue() {
+    return parsedStrategies
+        .map(strategy => ({
+            strategy,
+            contracts: strategy.legs.reduce((total, leg) => total + Math.abs(Number(leg.size) || 0), 0)
+        }))
+        .filter(item => item.contracts >= AUTO_FETCH_MIN_CONTRACTS)
+        .sort((a, b) => b.contracts - a.contracts)
+        .map(item => item.strategy);
+}
+
+function updateStrategyFetchButton(strategy) {
+    const button = [...document.querySelectorAll('.col-rfq button[data-rfq-id]')]
+        .find(item => item.dataset.rfqId === String(strategy.id));
+    if (!button) return;
+
+    const labels = {
+        idle: 'Fetch prices',
+        queued: 'Queued',
+        fetching: 'Fetching...',
+        done: 'Refresh prices',
+        partial: 'Retry missing',
+        failed: 'Retry prices'
+    };
+    button.textContent = labels[strategy.priceFetchState || 'idle'];
+    button.disabled = strategy.isFetchingPrices || strategy.priceFetchState === 'queued' || strategy.priceFetchState === 'fetching';
+}
+
+function startAutomaticPriceFetch() {
+    if (autoFetchLargeStrategiesStarted) return;
+    autoFetchLargeStrategiesStarted = true;
+    const generation = autoFetchGeneration;
+    const queue = getLargeStrategyPriceQueue();
+    const status = document.getElementById('priceFetchStatus');
+
+    if (queue.length === 0) {
+        status.textContent = `No RFQs with ${AUTO_FETCH_MIN_CONTRACTS}+ contracts to fetch.`;
+        return;
+    }
+
+    requestAnimationFrame(async () => {
+        queue.forEach(strategy => {
+            strategy.priceFetchState = 'queued';
+            updateStrategyFetchButton(strategy);
+        });
+
+        let completed = 0;
+        let partial = 0;
+        let failed = 0;
+        for (let index = 0; index < queue.length; index++) {
+            if (generation !== autoFetchGeneration) return;
+            const strategy = queue[index];
+            const contracts = strategy.legs.reduce((total, leg) => total + Math.abs(Number(leg.size) || 0), 0);
+            strategy.priceFetchState = 'fetching';
+            status.textContent = `Fetching ${index + 1} of ${queue.length}: ${contracts.toFixed(2)} contracts.`;
+            updateStrategyFetchButton(strategy);
+
+            const succeeded = await fetchStrategyPrices(strategy.id, false);
+            if (generation !== autoFetchGeneration) return;
+            if (succeeded && strategy.priceFetchState === 'partial') partial++;
+            completed++;
+            if (!succeeded) failed++;
+            updateStrategyFetchButton(strategy);
+
+        }
+
+        status.textContent = `Auto-fetch complete: ${completed - partial - failed} succeeded, ${partial} partial, ${failed} failed.`;
+        renderStrategiesTable();
+    });
 }
 
 function setStrategiesSort(by) {
@@ -531,7 +617,7 @@ function setStrategiesSort(by) {
 
 function renderChartAndTable() {
     renderChart();
-    processAndRenderPositions();
+    renderStrategiesTable();
 }
 
 // Date range modal handlers and sort shortcuts
@@ -599,20 +685,19 @@ function setSortShortcut(kind) {
     renderStrategiesTable();
 }
 
-async function fetchStrategyPrices(strategyId) {
+async function fetchStrategyPrices(strategyId, renderOnUpdate = true) {
     const strategy = parsedStrategies.find(item => item.id === strategyId);
-    if (!strategy || strategy.isFetchingPrices) return;
+    if (!strategy || strategy.isFetchingPrices) return false;
 
     strategy.isFetchingPrices = true;
-    renderStrategiesTable();
+    strategy.priceFetchState = 'fetching';
+    if (renderOnUpdate) renderStrategiesTable();
+
+    let updatedLegCount = 0;
 
     try {
         const instruments = [...new Set(strategy.legs.map(leg => leg.instrument))];
         const priceMap = await fetchCurrentPricesForInstruments(instruments);
-        let strategyPnl = 0;
-        let strategyPnlUsd = 0;
-        let hasPrice = false;
-        let hasUsdPrice = false;
 
         strategy.legs.forEach(leg => {
             const quote = priceMap[leg.instrument];
@@ -623,22 +708,25 @@ async function fetchStrategyPrices(strategyId) {
             const legPnl = (leg.currentPrice - leg.entryPrice) * leg.size * (leg.side === 'buy' ? 1 : -1);
             leg.pnl = legPnl;
             leg.pnlUsd = leg.currentIndexPrice != null ? legPnl * leg.currentIndexPrice : null;
-            strategyPnl += legPnl;
-            hasPrice = true;
-            if (leg.pnlUsd != null) {
-                strategyPnlUsd += leg.pnlUsd;
-                hasUsdPrice = true;
-            }
+            updatedLegCount++;
         });
 
-        strategy.pnl = hasPrice ? strategyPnl : null;
-        strategy.pnlUsd = hasUsdPrice ? strategyPnlUsd : null;
+        const pricedLegs = strategy.legs.filter(leg => leg.currentPrice != null);
+        strategy.pnl = pricedLegs.length ? pricedLegs.reduce((sum, leg) => sum + (leg.pnl || 0), 0) : null;
+        const usdPricedLegs = pricedLegs.filter(leg => leg.pnlUsd != null);
+        strategy.pnlUsd = usdPricedLegs.length ? usdPricedLegs.reduce((sum, leg) => sum + leg.pnlUsd, 0) : null;
+        strategy.priceFetchState = pricedLegs.length === 0
+            ? 'failed'
+            : (updatedLegCount < strategy.legs.length ? 'partial' : 'done');
     } catch (error) {
         console.error('Price fetch error', error);
+        strategy.priceFetchState = strategy.legs.some(leg => leg.currentPrice != null) ? 'partial' : 'failed';
     } finally {
         strategy.isFetchingPrices = false;
-        renderStrategiesTable();
+        if (renderOnUpdate) renderStrategiesTable();
+        else updateStrategyFetchButton(strategy);
     }
+    return strategy.legs.some(leg => leg.currentPrice != null);
 }
 
 function calculateStrategyRiskReward(strategy) {
@@ -672,7 +760,7 @@ function calculateStrategyRiskReward(strategy) {
 async function fetchCurrentPricesForInstruments(instruments) {
     const now = Date.now();
     const uniqueInstruments = [...new Set(instruments)];
-    const results = await Promise.all(uniqueInstruments.map(async inst => {
+    const settledResults = await Promise.allSettled(uniqueInstruments.map(async inst => {
         const cached = priceCache.store[inst];
         if (cached && (now - cached.ts) < priceCache.ttl) {
             return [inst, { price: cached.price, indexPrice: cached.indexPrice ?? null }];
@@ -680,7 +768,7 @@ async function fetchCurrentPricesForInstruments(instruments) {
 
         let request = priceCache.inflight[inst];
         if (!request) {
-            request = (async () => {
+            request = priceFetchQueue.then(async () => {
             try {
                 const url = `https://www.deribit.com/api/v2/public/ticker?instrument_name=${encodeURIComponent(inst)}`;
                 const res = await fetch(url, { cache: 'no-store' });
@@ -706,8 +794,11 @@ async function fetchCurrentPricesForInstruments(instruments) {
                 delete priceCache.inflight[inst];
             }
             return null;
-            })();
+            });
             priceCache.inflight[inst] = request;
+            priceFetchQueue = request
+                .catch(() => null)
+                .then(() => new Promise(resolve => setTimeout(resolve, PRICE_REQUEST_DELAY_MS)));
         }
 
         const quote = await request;
@@ -715,7 +806,10 @@ async function fetchCurrentPricesForInstruments(instruments) {
     }));
 
     try { localStorage.setItem('priceCacheStore', JSON.stringify(priceCache.store)); } catch (e) {}
-    return Object.fromEntries(results.filter(Boolean));
+    const results = settledResults
+        .filter(result => result.status === 'fulfilled' && result.value)
+        .map(result => result.value);
+    return Object.fromEntries(results);
 }
 
 function getStrategiesForCurrentView() {
@@ -828,8 +922,10 @@ function renderStrategiesTable() {
         const rfqId = document.createElement('div'); rfqId.innerText = strategy.id;
         const fetchButton = document.createElement('button');
         fetchButton.className = 'mt-2 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed';
-        fetchButton.innerText = strategy.isFetchingPrices ? 'Fetching...' : 'Fetch prices';
-        fetchButton.disabled = strategy.isFetchingPrices;
+        fetchButton.dataset.rfqId = String(strategy.id);
+        const priceFetchLabels = { idle: 'Fetch prices', queued: 'Queued', fetching: 'Fetching...', done: 'Refresh prices', partial: 'Retry missing', failed: 'Retry prices' };
+        fetchButton.innerText = priceFetchLabels[strategy.priceFetchState || 'idle'];
+        fetchButton.disabled = strategy.isFetchingPrices || strategy.priceFetchState === 'queued' || strategy.priceFetchState === 'fetching';
         fetchButton.onclick = () => fetchStrategyPrices(strategy.id);
         colRFQ.appendChild(rfqId);
         colRFQ.appendChild(fetchButton);

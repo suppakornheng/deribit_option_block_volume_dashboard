@@ -29,4 +29,5 @@ Notes:
 - The page uses CDN-hosted Chart.js and Google Fonts.
 - Tailwind utility classes are compiled into static CSS during the build; the browser does not run the Tailwind CDN compiler.
 - Live data comes from Deribit's public endpoints in the browser; requests remain subject to network access and provider rate limits.
+- After positions render, RFQs with at least 200 total contracts automatically fetch prices in descending contract size. Ticker requests are serialized globally with a one-second gap between requests. Smaller RFQs remain manual. If a leg quote is rejected, successful leg values still update and the RFQ is marked partial so missing quotes can be retried.
 - Keep functions that are invoked from HTML (e.g., `startLiveApiEngine`) in global scope — `src/js/app.js` is a standard script.
