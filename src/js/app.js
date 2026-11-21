@@ -754,6 +754,7 @@ function setDateRangeYesterday() {
 function setSortShortcut(kind) {
     if (kind === 'date') { strategiesSort.by = 'timestampMsec'; strategiesSort.dir = -1; }
     else if (kind === 'contracts') { strategiesSort.by = 'netSize'; strategiesSort.dir = -1; }
+    else if (kind === 'rr') { strategiesSort.by = 'rr'; strategiesSort.dir = -1; }
     renderStrategiesTable();
 }
 
@@ -762,6 +763,34 @@ function getInstrumentFetchPriority(instrument) {
         const hasInstrument = strategy.legs.some(leg => leg.instrument === instrument);
         return hasInstrument ? Math.max(highestAmount, Number(strategy.amount) || 0) : highestAmount;
     }, 0);
+}
+
+function calculateStrategyRiskReward(strategy) {
+    const strikes = strategy.legs.map(leg => Number(leg.strike)).filter(Number.isFinite);
+    if (strikes.length === 0) return null;
+
+    const start = Math.max(0, Math.min(...strikes) - 10000);
+    const end = Math.max(...strikes) + 10000;
+    const step = Math.max(1, Math.round((end - start) / 50));
+    let maxProfit = 0;
+    let maxLoss = 0;
+
+    for (let underlying = start; underlying <= end; underlying += step) {
+        let payoff = 0;
+        strategy.legs.forEach(leg => {
+            const premium = Number(leg.entryPriceUsd != null ? leg.entryPriceUsd : leg.entryPrice) || 0;
+            const ratio = Number(leg.ratio) || 0;
+            const intrinsic = leg.type === 'Call'
+                ? Math.max(0, underlying - leg.strike)
+                : Math.max(0, leg.strike - underlying);
+            payoff += (leg.side === 'buy' ? 1 : -1) * (intrinsic - premium) * ratio;
+        });
+        maxProfit = Math.max(maxProfit, payoff);
+        maxLoss = Math.min(maxLoss, payoff);
+    }
+
+    if (maxLoss === 0) return maxProfit > 0 ? Infinity : null;
+    return maxProfit / Math.abs(maxLoss);
 }
 
 async function fetchCurrentPricesForInstruments(instruments) {
@@ -931,6 +960,7 @@ function renderStrategiesTable() {
         <div style="text-align:center">Net Current</div>
         <div style="text-align:center">P&L</div>
         <div style="text-align:center">P&L (USD)</div>
+        <div style="text-align:center">RR</div>
     `;
     // attach sorting handlers to header labels where appropriate
     header.querySelector('div:nth-child(1)').onclick = () => setStrategiesSort('id');
@@ -942,6 +972,7 @@ function renderStrategiesTable() {
     header.querySelector('div:nth-child(7)').onclick = () => setStrategiesSort('netCurrent');
     header.querySelector('div:nth-child(8)').onclick = () => setStrategiesSort('pnl');
     header.querySelector('div:nth-child(9)').onclick = () => setStrategiesSort('pnlUsd');
+    header.querySelector('div:nth-child(10)').onclick = () => setStrategiesSort('rr');
 
     container.appendChild(header);
 
@@ -982,7 +1013,8 @@ function renderStrategiesTable() {
         const firstExpiryRaw = s.legs[0]?.expiry || '';
         const firstExpiry = firstExpiryRaw ? parseExpiryToDate(firstExpiryRaw).getTime() : 0;
         const timestampMsec = s.timestamp || 0;
-        return Object.assign({}, s, { netEntry, netEntryUsd, netCurrent, pnl, pnlUsd, netSize, legCount, firstExpiry, firstExpiryLabel: firstExpiryRaw, timestampMsec });
+        const rr = calculateStrategyRiskReward(s);
+        return Object.assign({}, s, { netEntry, netEntryUsd, netCurrent, pnl, pnlUsd, netSize, legCount, rr, firstExpiry, firstExpiryLabel: firstExpiryRaw, timestampMsec });
     });
 
     const key = strategiesSort.by;
@@ -1049,8 +1081,9 @@ function renderStrategiesTable() {
         const colNetCurrent = document.createElement('div'); colNetCurrent.className = 'col-netcurrent'; colNetCurrent.innerText = (strategy.netCurrent != null) ? strategy.netCurrent.toFixed(4) : '-';
         const colPnl = document.createElement('div'); colPnl.className = 'col-pnl'; colPnl.innerText = (strategy.pnl != null) ? strategy.pnl.toFixed(4) : '-'; if (strategy.pnl != null) colPnl.classList.add(strategy.pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
         const colPnlUsd = document.createElement('div'); colPnlUsd.className = 'col-pnlusd'; colPnlUsd.innerText = (strategy.pnlUsd != null) ? strategy.pnlUsd.toFixed(4) : '-'; if (strategy.pnlUsd != null) colPnlUsd.classList.add(strategy.pnlUsd >= 0 ? 'pnl-positive' : 'pnl-negative');
+        const colRr = document.createElement('div'); colRr.className = 'col-rr'; colRr.style.textAlign = 'center'; colRr.innerText = strategy.rr === Infinity ? '∞' : (strategy.rr != null ? strategy.rr.toFixed(2) : '-');
 
-        top.appendChild(colRFQ); top.appendChild(colDate); top.appendChild(colLegs); top.appendChild(colNetSize); top.appendChild(colNetEntry); top.appendChild(colNetEntryUsd); top.appendChild(colNetCurrent); top.appendChild(colPnl); top.appendChild(colPnlUsd);
+        top.appendChild(colRFQ); top.appendChild(colDate); top.appendChild(colLegs); top.appendChild(colNetSize); top.appendChild(colNetEntry); top.appendChild(colNetEntryUsd); top.appendChild(colNetCurrent); top.appendChild(colPnl); top.appendChild(colPnlUsd); top.appendChild(colRr);
 
         const payoffRow = document.createElement('div'); payoffRow.className = 'payoff-row';
         const canvas = document.createElement('canvas'); canvas.id = `payoff_full_${strategy.id}`;
