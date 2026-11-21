@@ -12,6 +12,15 @@ let autoFetchGeneration = 0;
 let dateFilterFrom = null;
 let dateFilterTo = null;
 
+function formatNumber(value, decimals = 0) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return '-';
+    const fixed = number.toFixed(decimals);
+    const [integer, fraction] = fixed.split('.');
+    const formattedInteger = integer.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return fraction == null ? formattedInteger : `${formattedInteger}.${fraction}`;
+}
+
 // HELPER: Map Deribit DDMMMYY Expiry String to JavaScript Date objects using UTC boundaries
 function parseExpiryToDate(expiryStr) {
     const match = expiryStr.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/);
@@ -244,7 +253,7 @@ async function startLiveApiEngine() {
             parsedRecordsAccumulator = parsedRecordsAccumulator.concat(batchMapped);
 
             const oldestRecordInBatch = rawRfqs[rawRfqs.length - 1];
-            countTxt.innerText = `${parsedRecordsAccumulator.length} active leg records`;
+            countTxt.innerText = `${formatNumber(parsedRecordsAccumulator.length, 0)} active leg records`;
 
             const spanDistance = Date.now() - cutOffTimestamp;
             const deltaDistance = Date.now() - oldestRecordInBatch.timestamp;
@@ -377,12 +386,12 @@ function renderChart() {
                     min: -xAxisLimit,
                     max: xAxisLimit,
                     grid: { color: '#161b22' },
-                    ticks: { color: '#8b949e', callback: val => Math.abs(val) }
+                    ticks: { color: '#8b949e', callback: val => formatNumber(Math.abs(val), 0) }
                 },
                 y: {
                     reverse: true,
                     grid: { color: '#161b22' },
-                    ticks: { color: '#8b949e', font: { size: 11 } }
+                    ticks: { color: '#8b949e', font: { size: 11 }, callback: val => formatNumber(val, 0) }
                 }
             },
             plugins: {
@@ -407,7 +416,7 @@ function renderChart() {
                             if (matches.length === 0) return null;
 
                             const categoryTotal = matches.reduce((acc, curr) => acc + curr.volume, 0);
-                            const outputLines = [` • ${cat}: Total ${categoryTotal.toFixed(1)} consist of:`];
+                            const outputLines = [` • ${cat}: Total ${formatNumber(categoryTotal, 1)} consist of:`];
 
                             const breakdownMap = {};
                             matches.forEach(m => {
@@ -420,7 +429,7 @@ function renderChart() {
 
                             sortedExpiries.forEach(expiry => {
                                 const vol = breakdownMap[expiry];
-                                outputLines.push(`   ↳ ${vol.toFixed(1)} (${expiry})`);
+                                outputLines.push(`   ↳ ${formatNumber(vol, 1)} (${expiry})`);
                             });
 
                             return outputLines;
@@ -431,7 +440,7 @@ function renderChart() {
                                 if (Array.isArray(item.raw)) return;
                                 strikeTotal += Math.abs(item.raw);
                             });
-                            return `\nTotal Combined Strike Volume: ${strikeTotal.toFixed(1)}`;
+                            return `\nTotal Combined Strike Volume: ${formatNumber(strikeTotal, 1)}`;
                         }
                     }
                 }
@@ -588,7 +597,7 @@ function startAutomaticPriceFetch() {
             const strategy = queue[index];
             const contracts = strategy.legs.reduce((total, leg) => total + Math.abs(Number(leg.size) || 0), 0);
             strategy.priceFetchState = 'fetching';
-            status.textContent = `Fetching ${index + 1} of ${queue.length}: ${contracts.toFixed(2)} contracts.`;
+            status.textContent = `Fetching ${index + 1} of ${queue.length}: ${formatNumber(contracts, 2)} contracts.`;
             updateStrategyFetchButton(strategy);
 
             const succeeded = await fetchStrategyPrices(strategy.id, false);
@@ -909,7 +918,7 @@ function renderStrategiesTable() {
     const totalContractsSum = toRender.reduce((s, r) => s + (Number(r.netSize) || 0), 0);
     const totalPnlSum = toRender.reduce((s, r) => s + (Number(r.pnl) || 0), 0);
     const totalPnlUsdSum = toRender.reduce((s, r) => s + (Number(r.pnlUsd) || 0), 0);
-    totalSummary.innerHTML = `<strong>Total Contracts:</strong> ${Number(totalContractsSum).toFixed(2)} &nbsp; <strong>Total P&L:</strong> ${Number(totalPnlSum).toFixed(4)} &nbsp; <strong>Total P&L (USD):</strong> ${Number(totalPnlUsdSum).toFixed(4)}`;
+    totalSummary.innerHTML = `<strong>Total Contracts:</strong> ${formatNumber(totalContractsSum, 2)} &nbsp; <strong>Total P&L:</strong> ${formatNumber(totalPnlSum, 4)} &nbsp; <strong>Total P&L (USD):</strong> ${formatNumber(totalPnlUsdSum, 4)}`;
     container.insertBefore(totalSummary, header);
 
     // render each strategy as a card with a legs sub-table and a full-width payoff chart below
@@ -932,7 +941,7 @@ function renderStrategiesTable() {
         const colDate = document.createElement('div'); colDate.className = 'col-date';
         if (strategy.timestamp) {
             const dt = new Date(strategy.timestamp + (7*60*60*1000)).toISOString().replace('T',' ').split('.')[0];
-            const btcLine = strategy.btcPriceAtEntry != null ? `btc@${Number(strategy.btcPriceAtEntry).toFixed(2)}` : 'btc@-';
+            const btcLine = strategy.btcPriceAtEntry != null ? `btc@${formatNumber(strategy.btcPriceAtEntry, 2)}` : 'btc@-';
             colDate.innerHTML = `${dt}<br/><span class="text-xs text-gray-500">${btcLine}</span>`;
         } else {
             colDate.innerText = '-';
@@ -948,16 +957,16 @@ function renderStrategiesTable() {
             const tdSide = document.createElement('td'); tdSide.innerText = l.side.toUpperCase();
             const tdType = document.createElement('td'); tdType.innerText = l.type;
             const tdExpiry = document.createElement('td'); tdExpiry.innerText = l.expiry || '-';
-            const tdStrike = document.createElement('td'); tdStrike.innerText = l.strike;
-            const tdAmt = document.createElement('td'); tdAmt.innerText = Number(l.size).toFixed(2);
-            const tdEntry = document.createElement('td'); tdEntry.innerText = l.entryPrice != null ? l.entryPrice.toFixed(4) : '-';
-            const tdEntryUsd = document.createElement('td'); tdEntryUsd.innerText = l.entryPriceUsd != null ? l.entryPriceUsd.toFixed(4) : '-';
-            const tdEntryTotalBtc = document.createElement('td'); tdEntryTotalBtc.innerText = (l.entryPrice * l.size).toFixed(4);
-            const tdEntryTotalUsd = document.createElement('td'); tdEntryTotalUsd.innerText = l.entryPriceUsd != null ? (l.entryPriceUsd * l.size).toFixed(2) : '-';
-            const tdCurrent = document.createElement('td'); tdCurrent.innerText = l.currentPrice != null ? l.currentPrice.toFixed(4) : '-';
-            const tdCurrentUsd = document.createElement('td'); tdCurrentUsd.innerText = l.currentPrice != null && l.currentIndexPrice != null ? (l.currentPrice * l.currentIndexPrice).toFixed(2) : '-';
-            const tdPnl = document.createElement('td'); tdPnl.innerText = l.pnl != null ? l.pnl.toFixed(4) : '-';
-            const tdPnlUsd = document.createElement('td'); tdPnlUsd.innerText = l.pnlUsd != null ? l.pnlUsd.toFixed(4) : '-';
+            const tdStrike = document.createElement('td'); tdStrike.innerText = formatNumber(l.strike, 0);
+            const tdAmt = document.createElement('td'); tdAmt.innerText = formatNumber(l.size, 2);
+            const tdEntry = document.createElement('td'); tdEntry.innerText = l.entryPrice != null ? formatNumber(l.entryPrice, 4) : '-';
+            const tdEntryUsd = document.createElement('td'); tdEntryUsd.innerText = l.entryPriceUsd != null ? formatNumber(l.entryPriceUsd, 4) : '-';
+            const tdEntryTotalBtc = document.createElement('td'); tdEntryTotalBtc.innerText = formatNumber(l.entryPrice * l.size, 4);
+            const tdEntryTotalUsd = document.createElement('td'); tdEntryTotalUsd.innerText = l.entryPriceUsd != null ? formatNumber(l.entryPriceUsd * l.size, 2) : '-';
+            const tdCurrent = document.createElement('td'); tdCurrent.innerText = l.currentPrice != null ? formatNumber(l.currentPrice, 4) : '-';
+            const tdCurrentUsd = document.createElement('td'); tdCurrentUsd.innerText = l.currentPrice != null && l.currentIndexPrice != null ? formatNumber(l.currentPrice * l.currentIndexPrice, 2) : '-';
+            const tdPnl = document.createElement('td'); tdPnl.innerText = l.pnl != null ? formatNumber(l.pnl, 4) : '-';
+            const tdPnlUsd = document.createElement('td'); tdPnlUsd.innerText = l.pnlUsd != null ? formatNumber(l.pnlUsd, 4) : '-';
             if (l.pnl != null) tdPnl.className = l.pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
                 if (l.pnlUsd != null) tdPnlUsd.className = l.pnlUsd >= 0 ? 'pnl-positive' : 'pnl-negative';
                 tr.appendChild(tdSide); tr.appendChild(tdType); tr.appendChild(tdExpiry); tr.appendChild(tdStrike); tr.appendChild(tdAmt); tr.appendChild(tdEntry); tr.appendChild(tdEntryUsd); tr.appendChild(tdEntryTotalBtc); tr.appendChild(tdEntryTotalUsd); tr.appendChild(tdCurrent); tr.appendChild(tdCurrentUsd); tr.appendChild(tdPnl); tr.appendChild(tdPnlUsd);
@@ -966,13 +975,13 @@ function renderStrategiesTable() {
         legsTable.appendChild(ltHead); legsTable.appendChild(ltBody);
         colLegs.appendChild(legsTable);
 
-        const colNetSize = document.createElement('div'); colNetSize.className = 'col-netsize'; colNetSize.style.textAlign = 'center'; colNetSize.innerText = Number(strategy.netSize || 0).toFixed(2);
-        const colNetEntry = document.createElement('div'); colNetEntry.className = 'col-netentry'; colNetEntry.innerText = (strategy.netEntry != null) ? strategy.netEntry.toFixed(4) : '-';
-        const colNetEntryUsd = document.createElement('div'); colNetEntryUsd.className = 'col-netentryusd'; colNetEntryUsd.innerText = (strategy.netEntryUsd != null) ? strategy.netEntryUsd.toFixed(4) : '-';
-        const colNetCurrent = document.createElement('div'); colNetCurrent.className = 'col-netcurrent'; colNetCurrent.innerText = (strategy.netCurrent != null) ? strategy.netCurrent.toFixed(4) : '-';
-        const colPnl = document.createElement('div'); colPnl.className = 'col-pnl'; colPnl.innerText = (strategy.pnl != null) ? strategy.pnl.toFixed(4) : '-'; if (strategy.pnl != null) colPnl.classList.add(strategy.pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
-        const colPnlUsd = document.createElement('div'); colPnlUsd.className = 'col-pnlusd'; colPnlUsd.innerText = (strategy.pnlUsd != null) ? strategy.pnlUsd.toFixed(4) : '-'; if (strategy.pnlUsd != null) colPnlUsd.classList.add(strategy.pnlUsd >= 0 ? 'pnl-positive' : 'pnl-negative');
-        const colRr = document.createElement('div'); colRr.className = 'col-rr'; colRr.style.textAlign = 'center'; colRr.innerText = strategy.rr === Infinity ? '∞' : (strategy.rr != null ? strategy.rr.toFixed(2) : '-');
+        const colNetSize = document.createElement('div'); colNetSize.className = 'col-netsize'; colNetSize.style.textAlign = 'center'; colNetSize.innerText = formatNumber(strategy.netSize || 0, 2);
+        const colNetEntry = document.createElement('div'); colNetEntry.className = 'col-netentry'; colNetEntry.innerText = (strategy.netEntry != null) ? formatNumber(strategy.netEntry, 4) : '-';
+        const colNetEntryUsd = document.createElement('div'); colNetEntryUsd.className = 'col-netentryusd'; colNetEntryUsd.innerText = (strategy.netEntryUsd != null) ? formatNumber(strategy.netEntryUsd, 4) : '-';
+        const colNetCurrent = document.createElement('div'); colNetCurrent.className = 'col-netcurrent'; colNetCurrent.innerText = (strategy.netCurrent != null) ? formatNumber(strategy.netCurrent, 4) : '-';
+        const colPnl = document.createElement('div'); colPnl.className = 'col-pnl'; colPnl.innerText = (strategy.pnl != null) ? formatNumber(strategy.pnl, 4) : '-'; if (strategy.pnl != null) colPnl.classList.add(strategy.pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
+        const colPnlUsd = document.createElement('div'); colPnlUsd.className = 'col-pnlusd'; colPnlUsd.innerText = (strategy.pnlUsd != null) ? formatNumber(strategy.pnlUsd, 4) : '-'; if (strategy.pnlUsd != null) colPnlUsd.classList.add(strategy.pnlUsd >= 0 ? 'pnl-positive' : 'pnl-negative');
+        const colRr = document.createElement('div'); colRr.className = 'col-rr'; colRr.style.textAlign = 'center'; colRr.innerText = strategy.rr === Infinity ? '∞' : (strategy.rr != null ? formatNumber(strategy.rr, 2) : '-');
 
         top.appendChild(colRFQ); top.appendChild(colDate); top.appendChild(colLegs); top.appendChild(colNetSize); top.appendChild(colNetEntry); top.appendChild(colNetEntryUsd); top.appendChild(colNetCurrent); top.appendChild(colPnl); top.appendChild(colPnlUsd); top.appendChild(colRr);
 
@@ -1042,18 +1051,18 @@ function renderPayoffMiniChart(strategy, canvas) {
                         callbacks: {
                             title: (items) => {
                                 // Chart.js provides label in items[0].label as underlying price
-                                return `X: Price ${items[0]?.label}`;
+                                return `X: Price ${formatNumber(items[0]?.label, 2)}`;
                             },
                             label: (context) => {
                                 const y = context.parsed && context.parsed.y != null ? context.parsed.y : context.raw;
-                                return `Y: P&L ${Number(y).toFixed(6)}`;
+                                return `Y: P&L ${formatNumber(y, 6)}`;
                             }
                         }
                     }
                 },
                 scales: {
-                    x: { display: true, title: { display: true, text: 'Underlying Price', color: '#9ca3af' } },
-                    y: { display: true, title: { display: true, text: 'P&L', color: '#9ca3af' } }
+                    x: { display: true, title: { display: true, text: 'Underlying Price', color: '#9ca3af' }, ticks: { callback: val => formatNumber(val, 0) } },
+                    y: { display: true, title: { display: true, text: 'P&L', color: '#9ca3af' }, ticks: { callback: val => formatNumber(val, 2) } }
                 }
             }
         });

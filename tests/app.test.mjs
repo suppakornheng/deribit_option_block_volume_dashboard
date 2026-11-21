@@ -40,6 +40,13 @@ function createHarness(fetchImplementation = async () => {
     return { context, expiryFilter, fetchStatus, getAnimationFrame: () => animationFrame, getFetchCalls: () => fetchCalls, timeoutDelays };
 }
 
+test('number formatter adds thousands separators without changing decimals', () => {
+    const { context } = createHarness();
+    assert.equal(vm.runInContext("formatNumber(1234, 0)", context), '1,234');
+    assert.equal(vm.runInContext("formatNumber(-1234.5, 1)", context), '-1,234.5');
+    assert.equal(vm.runInContext("formatNumber(1234567.891, 3)", context), '1,234,567.891');
+});
+
 test('chart aggregates global and expiry-filtered volumes without fetching', () => {
     const { context, expiryFilter, getFetchCalls } = createHarness();
     const records = [
