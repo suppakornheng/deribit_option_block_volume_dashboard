@@ -1,0 +1,13 @@
+{
+  "name": "deribit-option-block-volume-dashboard",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "node scripts/build.mjs && tailwindcss -c tailwind.config.cjs -i src/css/styles.css -o dist/src/css/styles.css --minify",
+    "check": "node --check src/js/app.js",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}

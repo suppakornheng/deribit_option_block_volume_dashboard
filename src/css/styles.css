@@ -1,13 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 /* Project styles extracted from index.html */
-body { background-color: #0d1117; color: #c9d1d9; }
-* { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+:root {
+	color-scheme: dark;
+	--page: #0d1518;
+	--surface: #121e22;
+	--line: #2a3a3f;
+	--mint: #78d5ad;
+	--coral: #ff9a7b;
+}
+body {
+	min-width: 320px;
+	background: linear-gradient(145deg, #0d1518, #111b1d 55%, #151a1b);
+	color: #d7e0df;
+	font-family: "Manrope", sans-serif;
+}
+* { font-family: "Manrope", sans-serif; }
+code, pre, .font-mono { font-family: "DM Mono", monospace; }
+button, input, select { transition: border-color 140ms ease, background-color 140ms ease, opacity 140ms ease; }
+:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
+.bg-blue-600 { background-color: #287c69 !important; }
+.hover\:bg-blue-500:hover { background-color: #32967e !important; }
+.bg-indigo-600 { background-color: #536e63 !important; }
+.hover\:bg-indigo-500:hover { background-color: #698777 !important; }
+.pnl-positive { color: var(--mint); }
+.pnl-negative { color: var(--coral); }
+.upload-file-label:focus-within { outline: 2px solid var(--mint); outline-offset: 3px; }
+.status-error { color: var(--coral); }
+.positions-toolbar { flex-wrap: wrap; gap: 0.75rem; }
+.positions-toolbar-actions { flex-wrap: wrap; }
 
 /* Small helpers */
 .hidden { display: none !important; }
 
 /* P&L coloring */
-.pnl-positive { color: #16a34a; font-weight: 600; }
-.pnl-negative { color: #ef4444; font-weight: 600; }
+.pnl-positive { font-weight: 600; }
+.pnl-negative { font-weight: 600; }
 
 /* Sortable headers */
 .sortable { cursor: pointer; }
@@ -39,7 +69,7 @@ body { background-color: #0d1117; color: #c9d1d9; }
 .strategy-card .payoff-row { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed rgba(148,163,184,0.03); }
 
 /* Ensure payoff canvases and chart area have comfortable sizing */
-.dashboard-chart { height: 64vh !important; }
+.dashboard-chart { height: 64vh !important; min-height: 340px; }
 /* let the positions list flow naturally with the page (no inner scroll) */
 #positionsTable { max-height: 700px; overflow: auto; }
 
@@ -55,6 +85,25 @@ body { background-color: #0d1117; color: #c9d1d9; }
 
 /* ensure Entry Date column has a comfortable minimum width */
 .col-date { min-width: 11rem; }
+
+@media (max-width: 900px) {
+	body { padding: 1rem !important; }
+	#positionsTableContainer { padding: 0.75rem; }
+	.positions-toolbar { align-items: flex-start; flex-direction: column; }
+	.positions-toolbar-actions { width: 100%; gap: 0.5rem; }
+	.positions-toolbar-actions > * { margin-left: 0 !important; }
+	.positions-toolbar-actions .inline-flex { flex-wrap: wrap; }
+	.strategy-card .card-top { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.35rem; }
+	.strategy-card .card-top .col-legs { grid-column: 1 / -1; grid-row: 2; }
+	#positionsTable .cards-header { display: none; }
+	#positionsTable { max-height: none; overflow: visible; }
+	.strategy-card .card-legs-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
+	.dashboard-chart { height: 48vh !important; min-height: 300px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
 
 /* Date range modal styles */
 #dateRangeModal { display: none; }

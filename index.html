@@ -2,9 +2,14 @@
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Explore Deribit block RFQ option volume by strike, expiry, and strategy.">
+    <meta name="theme-color" content="#0d1518">
     <title>BTC Options Block Volume Profile Tracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="src/css/styles.css">
 </head>
 <body class="p-6">
@@ -23,13 +28,14 @@
                     <h2 class="text-sm font-bold text-gray-200 uppercase tracking-wider mb-2">Pipeline A: Local Data</h2>
                     <p class="text-xs text-gray-400 mb-4 leading-relaxed">Read static JSONL line-records out of your local storage drive.</p>
                 </div>
-                <label class="flex flex-col items-center justify-center w-full h-28 border border-gray-700 border-dashed rounded-lg cursor-pointer bg-gray-800/40 hover:bg-gray-800/70 transition-all">
+                <label class="upload-file-label flex flex-col items-center justify-center w-full h-28 border border-gray-700 border-dashed rounded-lg cursor-pointer bg-gray-800/40 hover:bg-gray-800/70 transition-all">
                     <div class="text-center p-3">
                         <span class="text-xs text-blue-400 font-semibold block mb-0.5">Upload JSONL</span>
                         <span class="text-[10px] text-gray-500 block">deribit_block_rfqs.jsonl</span>
                     </div>
-                    <input id="filePicker" type="file" accept=".jsonl,.txt" class="hidden" onchange="handleFileLoading(event)" />
+                    <input id="filePicker" type="file" accept=".jsonl,.txt" class="sr-only" aria-label="Choose a JSONL file" onchange="handleFileLoading(event)" />
                 </label>
+                <p id="uploadStatus" class="mt-3 text-xs text-gray-400" role="status" aria-live="polite"></p>
             </div>
 
             <!-- Pipeline B: Deribit API -->
@@ -40,14 +46,14 @@
                     
                     <div class="grid grid-cols-2 gap-2 mb-4">
                         <div>
-                            <label class="block text-[10px] text-gray-500 uppercase font-bold mb-1">Currency</label>
+                            <label for="apiCurrency" class="block text-[10px] text-gray-500 uppercase font-bold mb-1">Currency</label>
                             <select id="apiCurrency" class="w-full text-xs bg-gray-900 border border-gray-700 text-white rounded p-1.5 focus:outline-none">
                                 <option value="BTC">BTC</option>
                                 <option value="ETH">ETH</option>
                             </select>
                         </div>
                         <div>
-                            <label class="block text-[10px] text-gray-500 uppercase font-bold mb-1">Lookback (Days)</label>
+                            <label for="apiLookback" class="block text-[10px] text-gray-500 uppercase font-bold mb-1">Lookback (Days)</label>
                             <input id="apiLookback" type="number" value="30" min="1" max="365" class="w-full text-xs bg-gray-900 border border-gray-700 text-white rounded p-1.5 focus:outline-none">
                         </div>
                     </div>
@@ -59,7 +65,7 @@
                         Pull Block RFQs Stream
                     </button>
                     
-                    <div id="apiProgressContainer" class="hidden space-y-1.5 pt-2 border-t border-gray-800">
+                    <div id="apiProgressContainer" class="hidden space-y-1.5 pt-2 border-t border-gray-800" role="status" aria-live="polite">
                         <div class="flex justify-between text-[10px] text-gray-400">
                             <span id="apiProgressStatus">Ready...</span>
                             <span id="apiRecordCount">0 records</span>
@@ -67,7 +73,7 @@
                         <div class="w-full bg-gray-950 h-1.5 rounded-full overflow-hidden">
                             <div id="apiProgressBar" class="bg-emerald-500 h-full w-0 transition-all duration-150"></div>
                         </div>
-                        <div id="apiLogOutput" class="text-[9px] text-emerald-400/80 bg-black/40 p-1.5 rounded max-h-16 overflow-y-auto leading-normal whitespace-pre-wrap font-mono"></div>
+                        <div id="apiLogOutput" class="text-[9px] text-emerald-400/80 bg-black/40 p-1.5 rounded max-h-16 overflow-y-auto leading-normal whitespace-pre-wrap font-mono" role="log" aria-live="polite"></div>
                     </div>
                 </div>
             </div>
@@ -89,22 +95,18 @@
         </div>
 
         <div class="relative w-full bg-gray-900/40 p-4 border border-gray-800 rounded-xl dashboard-chart" style="height: 64vh;">
-            <canvas id="optionsChart"></canvas>
+            <canvas id="optionsChart" role="img" aria-label="Deribit option block volume by strike"></canvas>
         </div>
 
         <!-- Positions Table -->
         <div id="positionsTableContainer" class="mt-6 bg-gray-900/30 border border-gray-800 rounded-xl p-4">
-            <div class="flex items-center justify-between mb-3">
+            <div class="positions-toolbar flex items-center justify-between mb-3">
                 <h2 class="text-sm font-bold text-white">Parsed Positions</h2>
-                <div class="flex items-center gap-2">
-                    <label class="text-xs text-gray-400 mr-2 uppercase tracking-wider">Expiry:</label>
+                <div class="positions-toolbar-actions flex items-center gap-2">
+                    <label for="expiryFilter" class="text-xs text-gray-400 mr-2 uppercase tracking-wider">Expiry:</label>
                     <select id="expiryFilter" class="bg-gray-900 border border-gray-700 text-white rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500 cursor-pointer" onchange="renderChartAndTable()">
                         <option value="All">All Expiries</option>
                     </select>
-                    <label class="ml-3 text-xs text-gray-400 inline-flex items-center cursor-pointer">
-                        <input id="queryOnLandingChk" type="checkbox" class="mr-2" onchange="toggleQueryOnLanding(this.checked)" />
-                        Query prices on landing
-                    </label>
                     <button onclick="openDateRangeModal()" class="ml-3 text-xs bg-gray-800 border border-gray-700 text-gray-300 px-2 py-1 rounded hover:bg-gray-700">Date range</button>
                     <div class="ml-2 inline-flex items-center space-x-2">
                         <button onclick="setSortShortcut('date')" title="Sort by date (latest first)" class="text-xs bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 rounded">Sort: Date ↓</button>
@@ -133,11 +135,11 @@
                 <h3 class="text-sm font-bold text-white mb-3">Filter by Date Range</h3>
                 <div class="grid grid-cols-2 gap-3 mb-3">
                     <div>
-                        <label class="text-xs text-gray-400 block mb-1">From</label>
+                        <label for="dateFrom" class="text-xs text-gray-400 block mb-1">From</label>
                         <input id="dateFrom" type="date" class="w-full bg-gray-800 border border-gray-700 text-white rounded p-2" />
                     </div>
                     <div>
-                        <label class="text-xs text-gray-400 block mb-1">To</label>
+                        <label for="dateTo" class="text-xs text-gray-400 block mb-1">To</label>
                         <input id="dateTo" type="date" class="w-full bg-gray-800 border border-gray-700 text-white rounded p-2" />
                     </div>
                 </div>

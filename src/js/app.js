@@ -1,10 +1,9 @@
 let globalDataset = [];
 let rawFetchedRfqs = [];
 let chartInstance = null;
+const payoffChartInstances = new Set();
 let selectedAsset = 'BTC';
 let isFetchingApi = false;
-// timers for retrying failed price lookups (instrument -> timerId)
-const priceRetryTimers = {};
 // date range filter state (YYYY-MM-DD strings)
 let dateFilterFrom = null;
 let dateFilterTo = null;
@@ -143,19 +142,38 @@ function appendApiLog(msg) {
 }
 
 // PIPELINE A: LOCAL DATA UPLOAD FILE
+function setUploadStatus(message, isError = false) {
+    const status = document.getElementById('uploadStatus');
+    if (!status) return;
+    status.textContent = message;
+    status.classList.toggle('status-error', isError);
+}
+
 function handleFileLoading(event) {
     const file = event.target.files[0];
     if (!file) return;
 
+    setUploadStatus(`Reading ${file.name}...`);
     const reader = new FileReader();
     reader.onload = function(e) {
         selectedAsset = 'BTC';
         document.getElementById('dashTitleAsset').innerText = selectedAsset;
         globalDataset = parseRawJsonLines(e.target.result);
+        if (globalDataset.length === 0) {
+            setUploadStatus('No valid unexpired option legs found. Check the JSONL file and try again.', true);
+            event.target.value = '';
+            return;
+        }
         updateExpiryFilterDropdown();
         swapScreenToDashboard();
         renderChart();
         processAndRenderPositions();
+        setUploadStatus(`Loaded ${globalDataset.length} active option legs from ${file.name}.`);
+        event.target.value = '';
+    };
+    reader.onerror = function() {
+        setUploadStatus(`Could not read ${file.name}. Try another file.`, true);
+        event.target.value = '';
     };
     reader.readAsText(file);
 }
@@ -289,25 +307,29 @@ function downloadDatasetAsJsonl() {
 // 3. CHART INTERACTION ENGINE
 function renderChart() {
     const filterValue = document.getElementById('expiryFilter').value;
-    const scopeData = filterValue === 'All'
-        ? globalDataset
-        : globalDataset.filter(d => d.expiry === filterValue);
-
     const sortedUniqueStrikes = [...new Set(globalDataset.map(d => d.strike))].sort((a,b) => a-b);
     const categories = ["Call Buy Blocked", "Call Sell Blocked", "Put Buy Blocked", "Put Sell Blocked"];
     const colors = {
-        "Call Buy Blocked": "#2ca02c", "Call Sell Blocked": "#9467bd",
-        "Put Buy Blocked": "#bcbd22", "Put Sell Blocked": "#1f77b4"
+        "Call Buy Blocked": "#55c79a", "Call Sell Blocked": "#f28b70",
+        "Put Buy Blocked": "#e7c56d", "Put Sell Blocked": "#6bbac4"
     };
 
-    // SURGICAL CHANGE: Calculate absolute maximum volume across all expiries to lock the X-axis limits
+    const globalTotals = new Map();
+    const scopedTotals = new Map();
+    const scopedRecords = new Map();
     let maxGlobalVolume = 0;
-    sortedUniqueStrikes.forEach(strike => {
-        categories.forEach(cat => {
-            const matches = globalDataset.filter(d => d.strike === strike && d.category === cat);
-            const sum = matches.reduce((acc, curr) => acc + curr.volume, 0);
-            if (sum > maxGlobalVolume) maxGlobalVolume = sum;
-        });
+    globalDataset.forEach(record => {
+        const key = `${record.strike}|${record.category}`;
+        const volume = Number(record.volume) || 0;
+        const globalTotal = (globalTotals.get(key) || 0) + volume;
+        globalTotals.set(key, globalTotal);
+        if (globalTotal > maxGlobalVolume) maxGlobalVolume = globalTotal;
+
+        if (filterValue === 'All' || record.expiry === filterValue) {
+            scopedTotals.set(key, (scopedTotals.get(key) || 0) + volume);
+            if (!scopedRecords.has(key)) scopedRecords.set(key, []);
+            scopedRecords.get(key).push(record);
+        }
     });
     const xAxisLimit = maxGlobalVolume * 1.05 || 10; // 5% padding cushion
 
@@ -315,8 +337,7 @@ function renderChart() {
         const isCall = cat.startsWith("Call");
 
         const dataPoints = sortedUniqueStrikes.map(strike => {
-            const matches = scopeData.filter(d => d.strike === strike && d.category === cat);
-            const sum = matches.reduce((acc, curr) => acc + curr.volume, 0);
+            const sum = scopedTotals.get(`${strike}|${cat}`) || 0;
             return isCall ? -sum : sum;
         });
 
@@ -376,7 +397,7 @@ function renderChart() {
                             const strike = parseInt(context.label);
                             const cat = context.dataset.label;
 
-                            const matches = scopeData.filter(d => d.strike === strike && d.category === cat);
+                            const matches = scopedRecords.get(`${strike}|${cat}`) || [];
                             if (matches.length === 0) return null;
 
                             const categoryTotal = matches.reduce((acc, curr) => acc + curr.volume, 0);
@@ -430,18 +451,6 @@ const strategiesSort = { by: 'id', dir: 1 };
 // simple in-memory price cache to avoid rate limits
 const priceCache = { store: {}, ttl: 60 * 1000, inflight: {} }; // 60s TTL, inflight dedupe
 
-// historical BTC price cache (persisted) for converting BTC-denominated entry prices to USD
-const btcHistoryCache = { store: {}, ttl: 7 * 24 * 60 * 60 * 1000, inflight: {}, retryTimers: {}, concurrency: 3 };
-
-// hydrate btc history cache from localStorage
-try {
-    const rawB = localStorage.getItem('btcHistoryCacheStore');
-    if (rawB) {
-        const parsedB = JSON.parse(rawB);
-        if (parsedB && typeof parsedB === 'object') btcHistoryCache.store = parsedB;
-    }
-} catch (e) { console.warn('btcHistoryCache load failed', e); }
-
 // hydrate price cache from localStorage so repeated lookups survive reloads
 try {
     const raw = localStorage.getItem('priceCacheStore');
@@ -451,7 +460,7 @@ try {
     }
 } catch (e) { console.warn('priceCache load failed', e); }
 
-function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = null) {
+function processAndRenderPositions() {
     parsedStrategies = [];
 
     rawFetchedRfqs.forEach((rfq, idx) => {
@@ -507,154 +516,7 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
         s.btcPriceAtEntry = entryLeg?.entryIndexPrice ?? null;
     });
 
-    if (!fetchPrices) {
-        // Do not query prices — render with null currentPrice/pnl
-        parsedStrategies.forEach(s => { s.legs.forEach(l => { l.currentPrice = null; l.pnl = null; }); s.pnl = null; });
-        renderStrategiesTable();
-        return;
-    }
-
-    // Render an initial table immediately (prices will populate when fetch completes)
     renderStrategiesTable();
-
-    // Always fetch historical BTC prices for strategies' entry dates (user opted in)
-    // Collect unique YYYY-MM-DD dates (UTC) from strategy timestamps
-    const uniqueDates = [...new Set(parsedStrategies.map(s => {
-        if (!s.timestamp) return null;
-        const d = new Date(s.timestamp);
-        return d.toISOString().slice(0,10);
-    }).filter(Boolean))];
-
-    // batch fetch historical BTC prices with limited concurrency
-    const btcDatePromises = [];
-    const semaphore = { running: 0 };
-    function scheduleDateFetch(dateStr) {
-        return new Promise((resolve) => {
-            const attempt = async () => {
-                while (semaphore.running >= btcHistoryCache.concurrency) {
-                    await new Promise(r => setTimeout(r, 50));
-                }
-                semaphore.running++;
-                try {
-                    const price = await fetchHistoricalBtcPriceForDate(dateStr);
-                    resolve({ date: dateStr, price });
-                } catch (e) {
-                    resolve({ date: dateStr, price: null });
-                } finally { semaphore.running--; }
-            };
-            attempt();
-        });
-    }
-
-    uniqueDates.forEach(d => btcDatePromises.push(scheduleDateFetch(d)));
-
-    Promise.all(btcDatePromises).then(results => {
-        const map = {};
-        results.forEach(r => { if (r && r.date) map[r.date] = r.price; });
-        // attach prices to strategies
-        parsedStrategies.forEach(s => {
-            if (!s.timestamp) return;
-            const d = new Date(s.timestamp).toISOString().slice(0,10);
-            if (s.btcPriceAtEntry == null) s.btcPriceAtEntry = (d in map) ? map[d] : null;
-            // compute per-leg USD entry if btc price available
-            s.legs.forEach(l => {
-                if (s.btcPriceAtEntry != null) l.entryPriceUsd = l.entryPrice * s.btcPriceAtEntry; else l.entryPriceUsd = null;
-            });
-        });
-        // re-run instrument price fetch to compute USD pnl if needed
-        // gather instruments optionally filtered by expiry
-        const instruments2 = [...new Set(parsedStrategies.flatMap(s => s.legs.filter(l => {
-            if (!expiryFilterForFetch) return true; return l.expiry === expiryFilterForFetch;
-        }).map(l => l.instrument)))];
-        instruments2.sort((a, b) => getInstrumentFetchPriority(b) - getInstrumentFetchPriority(a));
-        fetchCurrentPricesForInstruments(instruments2).then(priceMap2 => {
-            parsedStrategies.forEach(strategy => {
-                let strategyPnl = 0; let hasPrice = false;
-                strategy.legs.forEach(leg => {
-                    const quote = priceMap2[leg.instrument];
-                    const cp = quote?.price;
-                    if (cp != null) leg.currentPrice = cp;
-                    if (quote?.indexPrice != null) leg.currentIndexPrice = quote.indexPrice;
-                    if (leg.currentPrice != null) hasPrice = true;
-                    if (leg.currentPrice != null && leg.entryPrice != null) {
-                        const diff = (leg.currentPrice - leg.entryPrice);
-                        const legPnl = diff * leg.size * (leg.side === 'buy' ? 1 : -1);
-                        leg.pnl = legPnl;
-                        leg.pnlUsd = leg.currentIndexPrice != null ? legPnl * leg.currentIndexPrice : null;
-                        strategyPnl += legPnl;
-                    }
-                });
-                strategy.pnl = hasPrice ? strategyPnl : (strategy.pnl || null);
-            });
-            renderStrategiesTable();
-        }).catch(e => { console.warn('instrument fetch after btc history failed', e); renderStrategiesTable(); });
-    }).catch(e => { console.warn('btc history fetch failed', e); });
-
-    // gather instruments optionally filtered by expiry
-    const instruments = [...new Set(parsedStrategies.flatMap(s => s.legs.filter(l => {
-        if (!expiryFilterForFetch) return true;
-        return l.expiry === expiryFilterForFetch;
-    }).map(l => l.instrument)))];
-    instruments.sort((a, b) => getInstrumentFetchPriority(b) - getInstrumentFetchPriority(a));
-
-    fetchCurrentPricesForInstruments(instruments).then(priceMap => {
-        parsedStrategies.forEach(strategy => {
-            let strategyPnl = 0;
-            let hasPrice = false;
-            strategy.legs.forEach(leg => {
-                // only set price/pnl if we fetched this instrument (or if fetch was for all)
-                const quote = priceMap[leg.instrument];
-                const cp = quote?.price;
-                        if (cp != null) {
-                            leg.currentPrice = cp;
-                        }
-                    if (quote?.indexPrice != null) leg.currentIndexPrice = quote.indexPrice;
-                        if (leg.currentPrice != null) hasPrice = true;
-                        // prefer USD entry price when available
-                        if (leg.currentPrice != null && leg.entryPrice != null) {
-                            const diff = (leg.currentPrice - leg.entryPrice);
-                            const legPnl = diff * leg.size * (leg.side === 'buy' ? 1 : -1);
-                            leg.pnl = legPnl;
-                            leg.pnlUsd = leg.currentIndexPrice != null ? legPnl * leg.currentIndexPrice : null;
-                            strategyPnl += legPnl;
-                        } else {
-                            // leave existing pnl null if no price
-                            leg.pnl = leg.pnl || null;
-                        }
-            });
-            strategy.pnl = hasPrice ? strategyPnl : (strategy.pnl || null);
-        });
-
-        renderStrategiesTable();
-
-        // if some instruments failed to return prices, schedule retries after 35s
-        const failed = instruments.filter(inst => !(inst in priceMap) || priceMap[inst] == null);
-        if (failed.length > 0) {
-            failed.forEach(inst => {
-                // avoid scheduling duplicate retry timers
-                if (priceRetryTimers[inst]) return;
-                // schedule a single retry for this instrument after 35 seconds
-                const tid = setTimeout(async () => {
-                    try {
-                        const pm = await fetchCurrentPricesForInstruments([inst]);
-                        if (pm && pm[inst] != null) {
-                            // we got a price on retry; re-render table to show updates
-                            renderStrategiesTable();
-                        }
-                    } catch (e) {
-                        console.warn('retry fetch failed for', inst, e);
-                    } finally {
-                        try { clearTimeout(priceRetryTimers[inst]); } catch (e) {}
-                        delete priceRetryTimers[inst];
-                    }
-                }, 35000);
-                priceRetryTimers[inst] = tid;
-            });
-        }
-    }).catch(err => {
-        console.error('Price fetch error', err);
-        renderStrategiesTable();
-    });
 }
 
 function setStrategiesSort(by) {
@@ -737,13 +599,6 @@ function setSortShortcut(kind) {
     renderStrategiesTable();
 }
 
-function getInstrumentFetchPriority(instrument) {
-    return parsedStrategies.reduce((highestAmount, strategy) => {
-        const hasInstrument = strategy.legs.some(leg => leg.instrument === instrument);
-        return hasInstrument ? Math.max(highestAmount, Number(strategy.amount) || 0) : highestAmount;
-    }, 0);
-}
-
 async function fetchStrategyPrices(strategyId) {
     const strategy = parsedStrategies.find(item => item.id === strategyId);
     if (!strategy || strategy.isFetchingPrices) return;
@@ -815,33 +670,24 @@ function calculateStrategyRiskReward(strategy) {
 }
 
 async function fetchCurrentPricesForInstruments(instruments) {
-    const map = {};
     const now = Date.now();
-    const fetchPromises = [];
-    const inflightWaits = [];
-
-    instruments.forEach(inst => {
+    const uniqueInstruments = [...new Set(instruments)];
+    const results = await Promise.all(uniqueInstruments.map(async inst => {
         const cached = priceCache.store[inst];
         if (cached && (now - cached.ts) < priceCache.ttl) {
-            map[inst] = { price: cached.price, indexPrice: cached.indexPrice ?? null };
-            return;
+            return [inst, { price: cached.price, indexPrice: cached.indexPrice ?? null }];
         }
 
-        // if there's already an inflight request for this instrument, wait for it
-        if (priceCache.inflight[inst]) {
-            inflightWaits.push(priceCache.inflight[inst].then(p => { if (p != null) map[inst] = p; }));
-            return;
-        }
-
-        // otherwise, create a fetch promise and store it in inflight to dedupe concurrent calls
-        const p = (async () => {
+        let request = priceCache.inflight[inst];
+        if (!request) {
+            request = (async () => {
             try {
                 const url = `https://www.deribit.com/api/v2/public/ticker?instrument_name=${encodeURIComponent(inst)}`;
                 const res = await fetch(url, { cache: 'no-store' });
                 if (!res.ok) return null;
                 const payload = await res.json();
                 const r = payload.result || {};
-                let price = r.last_price || r.last || r.last_trade_price || null;
+                let price = r.last_price ?? r.last ?? r.last_trade_price ?? null;
                 if (!price) {
                     const bid = r.best_bid_price || null;
                     const ask = r.best_ask_price || null;
@@ -852,115 +698,80 @@ async function fetchCurrentPricesForInstruments(instruments) {
                     const indexPrice = Number(r.index_price) || null;
                     const quote = { price: numP, indexPrice, ts: Date.now() };
                     priceCache.store[inst] = quote;
-                    try { localStorage.setItem('priceCacheStore', JSON.stringify(priceCache.store)); } catch (e) { }
-                    map[inst] = { price: numP, indexPrice };
-                    return map[inst];
+                    return { price: numP, indexPrice };
                 }
             } catch (e) {
                 console.warn('fetch price failed for', inst, e);
             } finally {
-                // clear inflight slot
-                try { delete priceCache.inflight[inst]; } catch (e) {}
+                delete priceCache.inflight[inst];
             }
             return null;
-        })();
-// Fetch historical BTC/USD price for a given UTC date string YYYY-MM-DD
-async function fetchHistoricalBtcPriceForDate(yyyy_mm_dd) {
-    if (!yyyy_mm_dd) return null;
-    const now = Date.now();
-    const cached = btcHistoryCache.store[yyyy_mm_dd];
-    if (cached && (now - cached.ts) < btcHistoryCache.ttl) return cached.price;
-
-    // dedupe inflight
-    if (btcHistoryCache.inflight[yyyy_mm_dd]) return btcHistoryCache.inflight[yyyy_mm_dd];
-
-    const promise = (async () => {
-        try {
-            // CoinGecko expects DD-MM-YYYY
-            const parts = yyyy_mm_dd.split('-');
-            const dmy = `${parts[2]}-${parts[1]}-${parts[0]}`;
-            const url = `https://api.coingecko.com/api/v3/coins/bitcoin/history?date=${encodeURIComponent(dmy)}`;
-            const res = await fetch(url, { cache: 'no-store' });
-            if (res.ok) {
-                const payload = await res.json();
-                const price = payload?.market_data?.current_price?.usd;
-                if (price != null) {
-                    btcHistoryCache.store[yyyy_mm_dd] = { price: Number(price), ts: Date.now() };
-                    try { localStorage.setItem('btcHistoryCacheStore', JSON.stringify(btcHistoryCache.store)); } catch (e) {}
-                    return Number(price);
-                }
-            }
-        } catch (err) {
-            console.warn('btc history fetch failed for', yyyy_mm_dd, err);
+            })();
+            priceCache.inflight[inst] = request;
         }
 
-        // fallback: try nearest previous day up to 7 days
-        try {
-            for (let i = 1; i <= 7; i++) {
-                const d = new Date(yyyy_mm_dd + 'T00:00:00Z');
-                d.setUTCDate(d.getUTCDate() - i);
-                const fallbackDate = d.toISOString().slice(0,10);
-                const cachedFb = btcHistoryCache.store[fallbackDate];
-                if (cachedFb && (now - cachedFb.ts) < btcHistoryCache.ttl) {
-                    btcHistoryCache.store[yyyy_mm_dd] = { price: cachedFb.price, ts: Date.now() };
-                    try { localStorage.setItem('btcHistoryCacheStore', JSON.stringify(btcHistoryCache.store)); } catch (e) {}
-                    return cachedFb.price;
-                }
-                try {
-                    const parts = fallbackDate.split('-');
-                    const dmy = `${parts[2]}-${parts[1]}-${parts[0]}`;
-                    const url = `https://api.coingecko.com/api/v3/coins/bitcoin/history?date=${encodeURIComponent(dmy)}`;
-                    const res = await fetch(url, { cache: 'no-store' });
-                    if (res.ok) {
-                        const payload = await res.json();
-                        const price = payload?.market_data?.current_price?.usd;
-                        if (price != null) {
-                            btcHistoryCache.store[yyyy_mm_dd] = { price: Number(price), ts: Date.now() };
-                            try { localStorage.setItem('btcHistoryCacheStore', JSON.stringify(btcHistoryCache.store)); } catch (e) {}
-                            return Number(price);
-                        }
-                    }
-                } catch (e) { /* continue */ }
-            }
-        } catch (e) { /* ignore */ }
+        const quote = await request;
+        return quote ? [inst, quote] : null;
+    }));
 
-        // final fallback: use current BTC price simple endpoint
-        try {
-            const curRes = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd', { cache: 'no-store' });
-            if (curRes.ok) {
-                const curPayload = await curRes.json();
-                const cur = curPayload?.bitcoin?.usd;
-                if (cur != null) {
-                    btcHistoryCache.store[yyyy_mm_dd] = { price: Number(cur), ts: Date.now() };
-                    try { localStorage.setItem('btcHistoryCacheStore', JSON.stringify(btcHistoryCache.store)); } catch (e) {}
-                    return Number(cur);
-                }
-            }
-        } catch (e) { /* ignore */ }
-
-        // if all fail, store null to avoid hammering
-        btcHistoryCache.store[yyyy_mm_dd] = { price: null, ts: Date.now() };
-        try { localStorage.setItem('btcHistoryCacheStore', JSON.stringify(btcHistoryCache.store)); } catch (e) {}
-        return null;
-    })();
-
-    btcHistoryCache.inflight[yyyy_mm_dd] = promise;
-    promise.finally(() => { try { delete btcHistoryCache.inflight[yyyy_mm_dd]; } catch (e) {} });
-    return promise;
+    try { localStorage.setItem('priceCacheStore', JSON.stringify(priceCache.store)); } catch (e) {}
+    return Object.fromEntries(results.filter(Boolean));
 }
 
-        priceCache.inflight[inst] = p;
-        fetchPromises.push(p);
+function getStrategiesForCurrentView() {
+    const expiryFilter = document.getElementById('expiryFilter').value;
+    let strategies = parsedStrategies.slice();
+    if (expiryFilter && expiryFilter !== 'All') {
+        strategies = strategies.filter(strategy => strategy.legs.some(leg => leg.expiry === expiryFilter));
+    }
+
+    if (dateFilterFrom || dateFilterTo) {
+        const startMs = dateFilterFrom ? new Date(`${dateFilterFrom}T00:00:00`).getTime() : null;
+        const endMs = dateFilterTo ? new Date(`${dateFilterTo}T23:59:59.999`).getTime() : null;
+        strategies = strategies.filter(strategy => {
+            const timestamp = strategy.timestamp || 0;
+            return (startMs == null || timestamp >= startMs) && (endMs == null || timestamp <= endMs);
+        });
+    }
+
+    strategies = strategies.map(strategy => {
+        const netEntry = strategy.legs.reduce((sum, leg) => sum + leg.entryPrice * leg.size * (leg.side === 'buy' ? -1 : 1), 0);
+        const netEntryUsd = strategy.legs.reduce((sum, leg) => sum + (leg.entryPriceUsd || 0) * leg.size * (leg.side === 'buy' ? -1 : 1), 0);
+        const netCurrent = strategy.legs.reduce((sum, leg) => sum + ((leg.currentPrice || 0) * leg.size * (leg.side === 'buy' ? 1 : -1)), 0);
+        const pnl = strategy.legs.reduce((sum, leg) => sum + (leg.pnl || 0), 0);
+        const pnlUsd = strategy.legs.reduce((sum, leg) => sum + (leg.pnlUsd || 0), 0);
+        const netSize = strategy.legs.reduce((sum, leg) => sum + Math.abs(leg.size || 0), 0);
+        const firstExpiryRaw = strategy.legs[0]?.expiry || '';
+        return Object.assign({}, strategy, {
+            netEntry,
+            netEntryUsd,
+            netCurrent,
+            pnl,
+            pnlUsd,
+            netSize,
+            legCount: strategy.legs.length,
+            rr: calculateStrategyRiskReward(strategy),
+            firstExpiry: firstExpiryRaw ? parseExpiryToDate(firstExpiryRaw).getTime() : 0,
+            firstExpiryLabel: firstExpiryRaw,
+            timestampMsec: strategy.timestamp || 0
+        });
     });
 
-    // wait for all inflight and fetch promises to resolve
-    await Promise.all([...inflightWaits, ...fetchPromises]);
+    const { by, dir } = strategiesSort;
+    strategies.sort((a, b) => {
+        const valueA = a[by] == null ? -Infinity : a[by];
+        const valueB = b[by] == null ? -Infinity : b[by];
+        if (typeof valueA === 'string') return valueA.localeCompare(valueB) * dir;
+        return (valueA - valueB) * dir;
+    });
 
-    return map;
+    return strategies;
 }
 
 function renderStrategiesTable() {
     const container = document.getElementById('positionsTable');
+    payoffChartInstances.forEach(chart => chart.destroy());
+    payoffChartInstances.clear();
     container.innerHTML = '';
 
     if (parsedStrategies.length === 0) {
@@ -997,55 +808,7 @@ function renderStrategiesTable() {
 
     container.appendChild(header);
 
-    // apply expiry filter
-    const expiryFilter = document.getElementById('expiryFilter').value;
-    let toRender = parsedStrategies.slice();
-    if (expiryFilter && expiryFilter !== 'All') {
-        toRender = toRender.filter(s => s.legs.some(l => l.expiry === expiryFilter));
-    }
-
-    // apply date range filter if set (date inputs are YYYY-MM-DD)
-    if (dateFilterFrom || dateFilterTo) {
-        let startMs = null; let endMs = null;
-        try {
-            if (dateFilterFrom) startMs = new Date(dateFilterFrom + 'T00:00:00').getTime();
-        } catch(e) { startMs = null; }
-        try {
-            if (dateFilterTo) endMs = new Date(dateFilterTo + 'T23:59:59.999').getTime();
-        } catch(e) { endMs = null; }
-
-        toRender = toRender.filter(s => {
-            const ts = s.timestamp || 0;
-            if (startMs != null && ts < startMs) return false;
-            if (endMs != null && ts > endMs) return false;
-            return true;
-        });
-    }
-
-    // compute sort keys and sort
-    toRender = toRender.map(s => {
-        const netEntry = s.legs.reduce((sum, l) => sum + l.entryPrice * l.size * (l.side === 'buy' ? -1 : 1), 0);
-        const netEntryUsd = s.legs.reduce((sum, l) => sum + (l.entryPriceUsd || 0) * l.size * (l.side === 'buy' ? -1 : 1), 0);
-        const netCurrent = s.legs.reduce((sum, l) => sum + ((l.currentPrice != null ? l.currentPrice : 0) * l.size * (l.side === 'buy' ? 1 : -1)), 0);
-        const pnl = s.legs.reduce((sum, l) => sum + (l.pnl || 0), 0);
-        const pnlUsd = s.legs.reduce((sum, l) => sum + (l.pnlUsd || 0), 0);
-        const netSize = s.legs.reduce((sum, l) => sum + Math.abs(l.size || 0), 0);
-        const legCount = s.legs.length;
-        const firstExpiryRaw = s.legs[0]?.expiry || '';
-        const firstExpiry = firstExpiryRaw ? parseExpiryToDate(firstExpiryRaw).getTime() : 0;
-        const timestampMsec = s.timestamp || 0;
-        const rr = calculateStrategyRiskReward(s);
-        return Object.assign({}, s, { netEntry, netEntryUsd, netCurrent, pnl, pnlUsd, netSize, legCount, rr, firstExpiry, firstExpiryLabel: firstExpiryRaw, timestampMsec });
-    });
-
-    const key = strategiesSort.by;
-    const dir = strategiesSort.dir;
-    toRender.sort((a,b) => {
-        const va = (a[key] == null) ? -Infinity : a[key];
-        const vb = (b[key] == null) ? -Infinity : b[key];
-        if (typeof va === 'string') return va.localeCompare(vb) * dir;
-        return (va - vb) * dir;
-    });
+    const toRender = getStrategiesForCurrentView();
 
     // summary row: totals (computed from filtered/sorted view)
     const totalSummary = document.createElement('div'); totalSummary.className = 'text-sm text-gray-300 mb-2';
@@ -1126,7 +889,9 @@ function renderStrategiesTable() {
         card.appendChild(payoffRow);
         container.appendChild(card);
 
-        setTimeout(() => renderPayoffMiniChart(strategy, canvas), 20);
+        requestAnimationFrame(() => {
+            if (canvas.isConnected) renderPayoffMiniChart(strategy, canvas);
+        });
     });
 }
 
@@ -1163,7 +928,7 @@ function renderPayoffMiniChart(strategy, canvas) {
             type: 'line',
             data: { labels, datasets: [
                 { data: zeroData, borderColor: '#9ca3af', borderWidth: 1, pointRadius: 0, borderDash: [4,4], fill: false, tension: 0, order: 0 },
-                { data, borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, fill: true, backgroundColor: 'rgba(96,165,250,0.08)', order: 1 }
+                { data, borderColor: '#78d5ad', borderWidth: 1.5, pointRadius: 0, fill: true, backgroundColor: 'rgba(120,213,173,0.08)', order: 1 }
             ] },
             options: {
                 responsive: true,
@@ -1196,6 +961,7 @@ function renderPayoffMiniChart(strategy, canvas) {
                 }
             }
         });
+        payoffChartInstances.add(mini);
     } catch (e) {
         console.warn('mini chart failed', e);
     }
@@ -1208,38 +974,16 @@ function exportStrategiesCSV() {
         return;
     }
 
-    // build current view (same logic as renderStrategiesTable)
-    const expiryFilter = document.getElementById('expiryFilter').value;
-    let toRender = parsedStrategies.slice();
-    if (expiryFilter && expiryFilter !== 'All') {
-        toRender = toRender.filter(s => s.legs.some(l => l.expiry === expiryFilter));
-    }
-
-    toRender = toRender.map(s => {
-        const netEntry = s.legs.reduce((sum, l) => sum + l.entryPrice * l.size * (l.side === 'buy' ? -1 : 1), 0);
-        const netEntryUsd = s.legs.reduce((sum, l) => sum + (l.entryPriceUsd || 0) * l.size * (l.side === 'buy' ? -1 : 1), 0);
-        const netCurrent = s.legs.reduce((sum, l) => sum + ((l.currentPrice != null ? l.currentPrice : 0) * l.size * (l.side === 'buy' ? 1 : -1)), 0);
-        const pnl = s.legs.reduce((sum, l) => sum + (l.pnl || 0), 0);
-        const pnlUsd = s.legs.reduce((sum, l) => sum + (l.pnlUsd || 0), 0);
-        const netSize = s.legs.reduce((sum, l) => sum + Math.abs(l.size || 0), 0);
-        const firstExpiryRaw = s.legs[0]?.expiry || '';
-        const firstExpiry = firstExpiryRaw ? parseExpiryToDate(firstExpiryRaw).getTime() : 0;
-        const timestampMsec = s.timestamp || 0;
-        return Object.assign({}, s, { netEntry, netEntryUsd, netCurrent, pnl, pnlUsd, netSize, firstExpiry, firstExpiryLabel: firstExpiryRaw, timestampMsec });
-    });
-
-    const key = strategiesSort.by;
-    const dir = strategiesSort.dir;
-    toRender.sort((a,b) => {
-        const va = (a[key] == null) ? -Infinity : a[key];
-        const vb = (b[key] == null) ? -Infinity : b[key];
-        if (typeof va === 'string') return va.localeCompare(vb) * dir;
-        return (va - vb) * dir;
-    });
+    const toRender = getStrategiesForCurrentView();
 
     // build CSV rows
     const rows = toRender.map(s => {
-        const legsText = s.legs.map(l => `${l.instrument}|${l.strike}|${l.type}|${l.side}|${l.ratio}|${Number(l.size).toFixed(2)}|${l.entryPrice}|${(l.entryPriceUsd!=null?l.entryPriceUsd:'')}|${(l.currentPrice!=null?l.currentPrice:'')}|${(l.pnl!=null?l.pnl:'')}|${(l.pnlUsd!=null?l.pnlUsd:'')}`).join(' ; ');
+        const legsText = s.legs.map(l => {
+            const currentUsd = l.currentPrice != null && l.currentIndexPrice != null ? l.currentPrice * l.currentIndexPrice : '';
+            return [l.instrument, l.strike, l.type, l.side, l.ratio, Number(l.size).toFixed(2), l.entryPrice,
+                l.entryPriceUsd ?? '', l.entryPrice * l.size, l.entryPriceUsd != null ? l.entryPriceUsd * l.size : '',
+                l.currentPrice ?? '', currentUsd, l.pnl ?? '', l.pnlUsd ?? ''].join('|');
+        }).join(' ; ');
         const dateUtc7 = s.timestamp ? new Date(s.timestamp + (7*60*60*1000)).toISOString().replace('T', ' ').split('.')[0] : '';
         return {
             RFQ: s.id,

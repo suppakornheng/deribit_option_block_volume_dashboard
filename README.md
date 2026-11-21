@@ -8,9 +8,25 @@ Files:
 - `src/js/app.js` — all JavaScript logic (parsing, API fetch, Chart rendering).
 
 How to run:
-1. Open `index.html` in a browser (no build step required).
-2. Use the Upload JSONL panel or the Deribit API pull to populate the dashboard.
+1. Install Node.js 20 or newer.
+2. Run `npm ci` and `npm run build`.
+3. Open `dist/index.html` in a browser, then use the Upload JSONL panel or Deribit API pull to populate the dashboard.
+
+Run `npm run check` and `npm test` to validate the JavaScript and core chart/view calculations.
+
+## Deploy to GitHub Pages
+
+The `Deploy dashboard to GitHub Pages` workflow checks the JavaScript, builds minimized Tailwind CSS, and publishes the static app whenever changes are pushed to `main`, or when started manually from the Actions tab. No repository secrets are required.
+
+To enable deployment:
+1. Push the repository to GitHub.
+2. In **Settings > Pages**, set the source to **GitHub Actions**.
+3. Push to `main` or run the workflow from **Actions**.
+
+The project-page URL is `https://<owner>.github.io/<repository>/`. App assets use relative paths, so the same files work at the repository subpath. This is a single-page dashboard without client-side routes, so a separate SPA fallback page is not needed.
 
 Notes:
-- The page uses CDN-hosted Chart.js and Tailwind CSS.
+- The page uses CDN-hosted Chart.js and Google Fonts.
+- Tailwind utility classes are compiled into static CSS during the build; the browser does not run the Tailwind CDN compiler.
+- Live data comes from Deribit's public endpoints in the browser; requests remain subject to network access and provider rate limits.
 - Keep functions that are invoked from HTML (e.g., `startLiveApiEngine`) in global scope — `src/js/app.js` is a standard script.
