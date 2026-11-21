@@ -3,10 +3,6 @@ let rawFetchedRfqs = [];
 let chartInstance = null;
 let selectedAsset = 'BTC';
 let isFetchingApi = false;
-// user preference: whether to query prices on landing (All expiries)
-// Default to true unless user explicitly set it to '0'
-let queryOnLanding = true;
-try { const q = localStorage.getItem('queryOnLanding'); if (q === '1') queryOnLanding = true; else if (q === '0') queryOnLanding = false; } catch(e){}
 // timers for retrying failed price lookups (instrument -> timerId)
 const priceRetryTimers = {};
 // date range filter state (YYYY-MM-DD strings)
@@ -132,12 +128,6 @@ function swapScreenToDashboard() {
     const dash = document.getElementById('dashboardScreen');
     dash.classList.remove('hidden');
     setTimeout(() => dash.classList.remove('opacity-0'), 50);
-    // initialize query-on-landing checkbox to reflect current preference
-    try {
-        const chk = document.getElementById('queryOnLandingChk');
-        if (chk) chk.checked = !!queryOnLanding;
-    } catch (e) {}
-
     // Default to newest-first by timestamp on initial dashboard landing
     if (strategiesSort.by === 'id') {
         strategiesSort.by = 'timestampMsec';
@@ -165,7 +155,7 @@ function handleFileLoading(event) {
         updateExpiryFilterDropdown();
         swapScreenToDashboard();
         renderChart();
-        processAndRenderPositions(queryOnLanding, null);
+        processAndRenderPositions();
     };
     reader.readAsText(file);
 }
@@ -263,7 +253,7 @@ async function startLiveApiEngine() {
             document.getElementById('liveStatusBadge').classList.remove('hidden');
             swapScreenToDashboard();
             renderChart();
-            processAndRenderPositions(queryOnLanding, null);
+            processAndRenderPositions();
         }
 
     } catch (err) {
@@ -506,6 +496,7 @@ function processAndRenderPositions(fetchPrices = false, expiryFilterForFetch = n
             rfqIndex: idx,
             timestamp: rfq.timestamp || rfq.created || null,
             amount: Number(rfq.amount || 0),
+            isFetchingPrices: false,
             legs
         });
     });
@@ -677,20 +668,8 @@ function setStrategiesSort(by) {
 }
 
 function renderChartAndTable() {
-    const expiry = document.getElementById('expiryFilter').value;
     renderChart();
-    if (expiry && expiry !== 'All') {
-        // Fetch prices only for selected expiry
-        processAndRenderPositions(true, expiry);
-    } else {
-        // Depending on user preference, optionally fetch on landing
-        processAndRenderPositions(queryOnLanding, null);
-    }
-}
-
-function toggleQueryOnLanding(val) {
-    queryOnLanding = !!val;
-    try { localStorage.setItem('queryOnLanding', queryOnLanding ? '1' : '0'); } catch(e){}
+    processAndRenderPositions();
 }
 
 // Date range modal handlers and sort shortcuts
@@ -763,6 +742,48 @@ function getInstrumentFetchPriority(instrument) {
         const hasInstrument = strategy.legs.some(leg => leg.instrument === instrument);
         return hasInstrument ? Math.max(highestAmount, Number(strategy.amount) || 0) : highestAmount;
     }, 0);
+}
+
+async function fetchStrategyPrices(strategyId) {
+    const strategy = parsedStrategies.find(item => item.id === strategyId);
+    if (!strategy || strategy.isFetchingPrices) return;
+
+    strategy.isFetchingPrices = true;
+    renderStrategiesTable();
+
+    try {
+        const instruments = [...new Set(strategy.legs.map(leg => leg.instrument))];
+        const priceMap = await fetchCurrentPricesForInstruments(instruments);
+        let strategyPnl = 0;
+        let strategyPnlUsd = 0;
+        let hasPrice = false;
+        let hasUsdPrice = false;
+
+        strategy.legs.forEach(leg => {
+            const quote = priceMap[leg.instrument];
+            if (quote?.price == null) return;
+
+            leg.currentPrice = quote.price;
+            if (quote.indexPrice != null) leg.currentIndexPrice = quote.indexPrice;
+            const legPnl = (leg.currentPrice - leg.entryPrice) * leg.size * (leg.side === 'buy' ? 1 : -1);
+            leg.pnl = legPnl;
+            leg.pnlUsd = leg.currentIndexPrice != null ? legPnl * leg.currentIndexPrice : null;
+            strategyPnl += legPnl;
+            hasPrice = true;
+            if (leg.pnlUsd != null) {
+                strategyPnlUsd += leg.pnlUsd;
+                hasUsdPrice = true;
+            }
+        });
+
+        strategy.pnl = hasPrice ? strategyPnl : null;
+        strategy.pnlUsd = hasUsdPrice ? strategyPnlUsd : null;
+    } catch (error) {
+        console.error('Price fetch error', error);
+    } finally {
+        strategy.isFetchingPrices = false;
+        renderStrategiesTable();
+    }
 }
 
 function calculateStrategyRiskReward(strategy) {
@@ -955,7 +976,7 @@ function renderStrategiesTable() {
         <div>Entry Date</div>
         <div>Legs</div>
         <div style="text-align:center">Total Contracts</div>
-        <div style="text-align:center">Net Entry</div>
+        <div style="text-align:center">Net Entry (BTC)</div>
         <div style="text-align:center">Net Entry (USD)</div>
         <div style="text-align:center">Net Current</div>
         <div style="text-align:center">P&L</div>
@@ -1040,7 +1061,15 @@ function renderStrategiesTable() {
 
         const top = document.createElement('div'); top.className = 'card-top text-sm text-gray-300';
 
-        const colRFQ = document.createElement('div'); colRFQ.className = 'col-rfq'; colRFQ.innerText = strategy.id;
+        const colRFQ = document.createElement('div'); colRFQ.className = 'col-rfq';
+        const rfqId = document.createElement('div'); rfqId.innerText = strategy.id;
+        const fetchButton = document.createElement('button');
+        fetchButton.className = 'mt-2 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed';
+        fetchButton.innerText = strategy.isFetchingPrices ? 'Fetching...' : 'Fetch prices';
+        fetchButton.disabled = strategy.isFetchingPrices;
+        fetchButton.onclick = () => fetchStrategyPrices(strategy.id);
+        colRFQ.appendChild(rfqId);
+        colRFQ.appendChild(fetchButton);
         const colDate = document.createElement('div'); colDate.className = 'col-date';
         if (strategy.timestamp) {
             const dt = new Date(strategy.timestamp + (7*60*60*1000)).toISOString().replace('T',' ').split('.')[0];
@@ -1053,7 +1082,7 @@ function renderStrategiesTable() {
 
         const colLegs = document.createElement('div'); colLegs.className = 'col-legs';
         const legsTable = document.createElement('table'); legsTable.className = 'card-legs-table';
-        const ltHead = document.createElement('thead'); ltHead.innerHTML = '<tr><th>Side</th><th>Type</th><th>Expiry</th><th>Strike</th><th>LegAmt</th><th>Entry</th><th>Entry (USD)</th><th>Current</th><th>PnL</th><th>P&L (USD)</th></tr>';
+        const ltHead = document.createElement('thead'); ltHead.innerHTML = '<tr><th>Side</th><th>Type</th><th>Expiry</th><th>Strike</th><th>LegAmt</th><th>Entry</th><th>Entry (USD)</th><th>Entry Total (BTC)</th><th>Entry Total (USD)</th><th>Current (BTC)</th><th>Current (USD)</th><th>PnL</th><th>P&L (USD)</th></tr>';
         const ltBody = document.createElement('tbody');
         strategy.legs.forEach(l => {
             const tr = document.createElement('tr');
@@ -1064,12 +1093,15 @@ function renderStrategiesTable() {
             const tdAmt = document.createElement('td'); tdAmt.innerText = Number(l.size).toFixed(2);
             const tdEntry = document.createElement('td'); tdEntry.innerText = l.entryPrice != null ? l.entryPrice.toFixed(4) : '-';
             const tdEntryUsd = document.createElement('td'); tdEntryUsd.innerText = l.entryPriceUsd != null ? l.entryPriceUsd.toFixed(4) : '-';
+            const tdEntryTotalBtc = document.createElement('td'); tdEntryTotalBtc.innerText = (l.entryPrice * l.size).toFixed(4);
+            const tdEntryTotalUsd = document.createElement('td'); tdEntryTotalUsd.innerText = l.entryPriceUsd != null ? (l.entryPriceUsd * l.size).toFixed(2) : '-';
             const tdCurrent = document.createElement('td'); tdCurrent.innerText = l.currentPrice != null ? l.currentPrice.toFixed(4) : '-';
+            const tdCurrentUsd = document.createElement('td'); tdCurrentUsd.innerText = l.currentPrice != null && l.currentIndexPrice != null ? (l.currentPrice * l.currentIndexPrice).toFixed(2) : '-';
             const tdPnl = document.createElement('td'); tdPnl.innerText = l.pnl != null ? l.pnl.toFixed(4) : '-';
             const tdPnlUsd = document.createElement('td'); tdPnlUsd.innerText = l.pnlUsd != null ? l.pnlUsd.toFixed(4) : '-';
             if (l.pnl != null) tdPnl.className = l.pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
                 if (l.pnlUsd != null) tdPnlUsd.className = l.pnlUsd >= 0 ? 'pnl-positive' : 'pnl-negative';
-                tr.appendChild(tdSide); tr.appendChild(tdType); tr.appendChild(tdExpiry); tr.appendChild(tdStrike); tr.appendChild(tdAmt); tr.appendChild(tdEntry); tr.appendChild(tdEntryUsd); tr.appendChild(tdCurrent); tr.appendChild(tdPnl); tr.appendChild(tdPnlUsd);
+                tr.appendChild(tdSide); tr.appendChild(tdType); tr.appendChild(tdExpiry); tr.appendChild(tdStrike); tr.appendChild(tdAmt); tr.appendChild(tdEntry); tr.appendChild(tdEntryUsd); tr.appendChild(tdEntryTotalBtc); tr.appendChild(tdEntryTotalUsd); tr.appendChild(tdCurrent); tr.appendChild(tdCurrentUsd); tr.appendChild(tdPnl); tr.appendChild(tdPnlUsd);
             ltBody.appendChild(tr);
         });
         legsTable.appendChild(ltHead); legsTable.appendChild(ltBody);
