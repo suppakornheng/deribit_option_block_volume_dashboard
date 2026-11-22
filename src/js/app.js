@@ -986,45 +986,164 @@ function renderStrategiesTable() {
         top.appendChild(colRFQ); top.appendChild(colDate); top.appendChild(colLegs); top.appendChild(colNetSize); top.appendChild(colNetEntry); top.appendChild(colNetEntryUsd); top.appendChild(colNetCurrent); top.appendChild(colPnl); top.appendChild(colPnlUsd); top.appendChild(colRr);
 
         const payoffRow = document.createElement('div'); payoffRow.className = 'payoff-row';
+        const timeline = getStrategyPayoffTimeline(strategy);
+        const selectedDays = Math.min(Number(strategy.payoffDays) || 0, timeline.maxDays);
+        const controls = document.createElement('div'); controls.className = 'payoff-controls';
+        const dayControl = document.createElement('input');
+        dayControl.type = 'range'; dayControl.min = '0'; dayControl.max = String(timeline.maxDays);
+        dayControl.step = '1'; dayControl.value = String(selectedDays);
+        dayControl.setAttribute('aria-label', 'Payoff valuation day');
+        const dateControl = document.createElement('input');
+        dateControl.type = 'date'; dateControl.min = timeline.today; dateControl.max = timeline.expiryDate;
+        dateControl.value = getPayoffDateForDay(selectedDays, timeline);
+        dateControl.setAttribute('aria-label', 'Payoff valuation date');
+        const dayLabel = document.createElement('span'); dayLabel.className = 'payoff-day-label';
+        const ivLabel = document.createElement('label'); ivLabel.className = 'payoff-iv-label';
+        const ivInput = document.createElement('input');
+        ivInput.type = 'range'; ivInput.min = '10'; ivInput.max = '200'; ivInput.step = '1';
+        ivInput.value = String(Math.min(200, Math.max(10, Number(strategy.payoffIv) || 60)));
+        ivInput.setAttribute('aria-label', 'Implied volatility assumption');
+        ivInput.title = 'Black–Scholes estimate with a 0% interest-rate assumption';
+        const ivValue = document.createElement('output');
+        ivLabel.append('Model IV ', ivInput, ivValue);
+        controls.append(dayLabel, dayControl, dateControl, ivLabel);
+
+        const updatePayoff = () => {
+            strategy.payoffDays = Number(dayControl.value);
+            strategy.payoffIv = Number(ivInput.value);
+            dayLabel.textContent = `Day ${strategy.payoffDays} · ${getPayoffDateForDay(strategy.payoffDays, timeline)}`;
+            ivValue.textContent = `${strategy.payoffIv}%`;
+            dateControl.value = getPayoffDateForDay(strategy.payoffDays, timeline);
+            updatePayoffMiniChart(strategy, canvas, timeline);
+        };
+        dayControl.addEventListener('input', updatePayoff);
+        dateControl.addEventListener('change', () => {
+            const selectedDate = Date.parse(`${dateControl.value}T00:00:00Z`);
+            const todayDate = Date.parse(`${timeline.today}T00:00:00Z`);
+            if (Number.isFinite(selectedDate)) {
+                dayControl.value = String(Math.min(timeline.maxDays, Math.max(0, Math.round((selectedDate - todayDate) / 86400000))));
+                updatePayoff();
+            }
+        });
+        ivInput.addEventListener('input', updatePayoff);
+        dayLabel.textContent = `Day ${selectedDays} · ${dateControl.value}`;
+        ivValue.textContent = `${ivInput.value}%`;
+
+        const chartContainer = document.createElement('div'); chartContainer.className = 'payoff-chart-container';
         const canvas = document.createElement('canvas'); canvas.id = `payoff_full_${strategy.id}`;
-        canvas.style.width = '100%'; canvas.style.height = '160px';
-        payoffRow.appendChild(canvas);
+        canvas.style.width = '100%'; canvas.style.height = '100%';
+        payoffRow.append(controls, chartContainer);
+        chartContainer.appendChild(canvas);
 
         card.appendChild(top);
         card.appendChild(payoffRow);
         container.appendChild(card);
 
         requestAnimationFrame(() => {
-            if (canvas.isConnected) renderPayoffMiniChart(strategy, canvas);
+            if (canvas.isConnected) renderPayoffMiniChart(strategy, canvas, timeline);
         });
     });
 }
 
-function renderPayoffMiniChart(strategy, canvas) {
-    try {
-        // determine strike range from legs
-        const strikes = strategy.legs.map(l => l.strike);
-        const Kmin = Math.min(...strikes);
-        const Kmax = Math.max(...strikes);
-        const start = Math.max(0, Kmin - 10000);
-        const end = Kmax + 10000;
-        const steps = 50;
-        const step = Math.max(1, Math.round((end - start) / steps));
-        const labels = [];
-        const data = [];
+function getStrategyPayoffTimeline(strategy) {
+    const now = Date.now();
+    const todayDate = new Date(now).toISOString().slice(0, 10);
+    const expiryTimes = strategy.legs.map(leg => parseExpiryToDate(leg.expiry).getTime()).filter(Number.isFinite);
+    const latestExpiry = expiryTimes.length ? Math.max(...expiryTimes) : now;
+    const expiryDate = new Date(Math.max(now, latestExpiry)).toISOString().slice(0, 10);
+    const todayMidnight = Date.parse(`${todayDate}T00:00:00Z`);
+    const expiryMidnight = Date.parse(`${expiryDate}T00:00:00Z`);
+    return {
+        today: todayDate,
+        expiryDate,
+        maxExpiry: latestExpiry,
+        maxDays: Math.max(0, Math.round((expiryMidnight - todayMidnight) / 86400000))
+    };
+}
 
-        for (let S = start; S <= end; S += step) {
-            labels.push(S);
-            let net = 0;
-            strategy.legs.forEach(leg => {
-                const intrinsic = (leg.type === 'Call') ? Math.max(0, S - leg.strike) : Math.max(0, leg.strike - S);
-                const entryUsd = (leg.entryPriceUsd != null) ? leg.entryPriceUsd : leg.entryPrice;
-                const ratioSize = Number(leg.ratio) || 0;
-                const legNet = (leg.side === 'buy') ? (intrinsic - entryUsd) * ratioSize : -(intrinsic - entryUsd) * ratioSize;
-                net += legNet;
-            });
-            data.push(net);
-        }
+function getPayoffDateForDay(dayOffset, timeline) {
+    const today = new Date(`${timeline.today}T00:00:00Z`);
+    today.setUTCDate(today.getUTCDate() + Number(dayOffset));
+    return today.toISOString().slice(0, 10) > timeline.expiryDate
+        ? timeline.expiryDate
+        : today.toISOString().slice(0, 10);
+}
+
+function getPayoffValuationTimestamp(dayOffset, timeline) {
+    if (Number(dayOffset) === 0) return Date.now();
+    const date = getPayoffDateForDay(dayOffset, timeline);
+    return Math.min(timeline.maxExpiry, Date.parse(`${date}T08:00:00Z`));
+}
+
+function normalCdf(value) {
+    const absolute = Math.abs(value);
+    const t = 1 / (1 + 0.2316419 * absolute);
+    const density = 0.3989422804014327 * Math.exp(-0.5 * absolute * absolute);
+    const probability = 1 - density * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+    return value >= 0 ? probability : 1 - probability;
+}
+
+function calculateOptionValue(underlying, strike, type, yearsRemaining, volatility) {
+    const intrinsic = type === 'Call' ? Math.max(0, underlying - strike) : Math.max(0, strike - underlying);
+    if (yearsRemaining <= 0 || volatility <= 0 || underlying <= 0 || strike <= 0) return intrinsic;
+
+    const deviation = volatility * Math.sqrt(yearsRemaining);
+    const d1 = (Math.log(underlying / strike) + 0.5 * volatility * volatility * yearsRemaining) / deviation;
+    const d2 = d1 - deviation;
+    return type === 'Call'
+        ? underlying * normalCdf(d1) - strike * normalCdf(d2)
+        : strike * normalCdf(-d2) - underlying * normalCdf(-d1);
+}
+
+function calculateStrategyPayoff(strategy, underlying, valuationTimestamp, impliedVolatility) {
+    const volatility = impliedVolatility / 100;
+    return strategy.legs.reduce((total, leg) => {
+        const expiry = parseExpiryToDate(leg.expiry).getTime();
+        const yearsRemaining = Math.max(0, (expiry - valuationTimestamp) / (365.25 * 86400000));
+        const value = calculateOptionValue(underlying, Number(leg.strike), leg.type, yearsRemaining, volatility);
+        const entryPremiumUsd = leg.entryPriceUsd != null
+            ? Number(leg.entryPriceUsd)
+            : Number(leg.entryPrice) * Number(leg.entryIndexPrice || strategy.btcPriceAtEntry || 1);
+        const size = Number(leg.size ?? leg.ratio ?? 1);
+        const direction = leg.side === 'buy' ? 1 : -1;
+        return total + direction * (value - (Number.isFinite(entryPremiumUsd) ? entryPremiumUsd : 0)) * size;
+    }, 0);
+}
+
+function getPayoffChartData(strategy, timeline, valuationTimestamp = null) {
+    const strikes = strategy.legs.map(leg => Number(leg.strike)).filter(Number.isFinite);
+    if (strikes.length === 0) return { labels: [], data: [] };
+    const start = Math.max(0, Math.min(...strikes) - 10000);
+    const end = Math.max(...strikes) + 10000;
+    const step = Math.max(1, Math.round((end - start) / 50));
+    const evaluatedAt = valuationTimestamp ?? getPayoffValuationTimestamp(strategy.payoffDays || 0, timeline);
+    const impliedVolatility = Number(strategy.payoffIv) || 60;
+    const labels = [];
+    const data = [];
+
+    for (let underlying = start; underlying <= end; underlying += step) {
+        labels.push(underlying);
+        data.push(calculateStrategyPayoff(strategy, underlying, evaluatedAt, impliedVolatility));
+    }
+    return { labels, data };
+}
+
+function updatePayoffMiniChart(strategy, canvas, timeline) {
+    const chart = canvas.payoffChart;
+    if (!chart) return;
+    const { labels, data } = getPayoffChartData(strategy, timeline);
+    const expiryData = getPayoffChartData(strategy, timeline, timeline.maxExpiry).data;
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = labels.map(() => 0);
+    chart.data.datasets[1].data = expiryData;
+    chart.data.datasets[2].data = data;
+    chart.update('none');
+}
+
+function renderPayoffMiniChart(strategy, canvas, timeline) {
+    try {
+        const { labels, data } = getPayoffChartData(strategy, timeline);
+        const expiryData = getPayoffChartData(strategy, timeline, timeline.maxExpiry).data;
 
         // eslint-disable-next-line no-unused-vars
         // add a zero-profit baseline dataset so charts show the zero line
@@ -1032,8 +1151,9 @@ function renderPayoffMiniChart(strategy, canvas) {
         const mini = new Chart(canvas.getContext('2d'), {
             type: 'line',
             data: { labels, datasets: [
-                { data: zeroData, borderColor: '#9ca3af', borderWidth: 1, pointRadius: 0, borderDash: [4,4], fill: false, tension: 0, order: 0 },
-                { data, borderColor: '#78d5ad', borderWidth: 1.5, pointRadius: 0, fill: true, backgroundColor: 'rgba(120,213,173,0.08)', order: 1 }
+                { label: 'Zero P&L', data: zeroData, borderColor: '#9ca3af', borderWidth: 1, pointRadius: 0, borderDash: [4,4], fill: false, tension: 0, order: 0 },
+                { label: 'Expiry', data: expiryData, borderColor: 'rgba(185, 196, 203, 0.7)', borderWidth: 1.5, pointRadius: 0, borderDash: [6,4], fill: false, tension: 0, order: 2 },
+                { label: 'Selected date', data, borderColor: '#78d5ad', borderWidth: 1.5, pointRadius: 0, fill: true, backgroundColor: 'rgba(120,213,173,0.08)', order: 1 }
             ] },
             options: {
                 responsive: true,
@@ -1043,11 +1163,22 @@ function renderPayoffMiniChart(strategy, canvas) {
                     intersect: false
                 },
                 plugins: {
-                    legend: { display: false },
+                    legend: {
+                        display: true,
+                        position: 'top',
+                        align: 'end',
+                        labels: {
+                            color: '#9ca3af',
+                            boxWidth: 18,
+                            padding: 8,
+                            filter: item => item.text !== 'Zero P&L'
+                        }
+                    },
                     tooltip: {
                         enabled: true,
                         mode: 'index',
                         intersect: false,
+                        filter: item => item.datasetIndex !== 0,
                         callbacks: {
                             title: (items) => {
                                 // Chart.js provides label in items[0].label as underlying price
@@ -1055,17 +1186,18 @@ function renderPayoffMiniChart(strategy, canvas) {
                             },
                             label: (context) => {
                                 const y = context.parsed && context.parsed.y != null ? context.parsed.y : context.raw;
-                                return `Y: P&L ${formatNumber(y, 6)}`;
+                                return `${context.dataset.label}: P&L ${formatNumber(y, 2)}`;
                             }
                         }
                     }
                 },
                 scales: {
-                    x: { display: true, title: { display: true, text: 'Underlying Price', color: '#9ca3af' }, ticks: { callback: val => formatNumber(val, 0) } },
-                    y: { display: true, title: { display: true, text: 'P&L', color: '#9ca3af' }, ticks: { callback: val => formatNumber(val, 2) } }
+                        x: { display: true, title: { display: true, text: 'Underlying Price (USD)', color: '#9ca3af' }, ticks: { callback: val => formatNumber(val, 0) } },
+                    y: { display: true, title: { display: true, text: 'Modeled P&L (USD)', color: '#9ca3af' }, ticks: { callback: val => formatNumber(val, 2) } }
                 }
             }
         });
+        canvas.payoffChart = mini;
         payoffChartInstances.add(mini);
     } catch (e) {
         console.warn('mini chart failed', e);

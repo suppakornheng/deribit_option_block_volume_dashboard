@@ -68,6 +68,60 @@ test('chart aggregates global and expiry-filtered volumes without fetching', () 
     assert.equal(getFetchCalls(), 0);
 });
 
+test('strategy payoff uses time value before expiry and contract size at expiry', () => {
+    const { context } = createHarness();
+    const strategy = {
+        legs: [{
+            type: 'Call',
+            side: 'buy',
+            strike: 100,
+            expiry: '01JAN27',
+            entryPriceUsd: 10,
+            size: 2
+        }]
+    };
+    const atExpiry = vm.runInContext(
+        `calculateStrategyPayoff(${JSON.stringify(strategy)}, 120, Date.parse('2027-01-01T08:00:00Z'), 60)`,
+        context
+    );
+    const beforeExpiry = vm.runInContext(
+        `calculateStrategyPayoff(${JSON.stringify(strategy)}, 100, Date.parse('2026-12-01T08:00:00Z'), 60)`,
+        context
+    );
+
+    assert.equal(atExpiry, 20);
+    assert.ok(beforeExpiry > -20, 'an at-the-money option retains time value before expiry');
+});
+
+test('payoff chart includes a dashed curve evaluated at expiry', () => {
+    const { context } = createHarness();
+    const strategy = {
+        payoffDays: 0,
+        payoffIv: 60,
+        legs: [{
+            type: 'Call',
+            side: 'buy',
+            strike: 10000,
+            expiry: '01JAN27',
+            entryPriceUsd: 100,
+            size: 2
+        }]
+    };
+    const result = JSON.parse(vm.runInContext(`(() => {
+        const canvas = { getContext: () => ({}) };
+        const timeline = { today: '2026-11-22', expiryDate: '2027-01-01', maxExpiry: Date.parse('2027-01-01T08:00:00Z'), maxDays: 40 };
+        renderPayoffMiniChart(${JSON.stringify(strategy)}, canvas, timeline);
+        const datasets = canvas.payoffChart.config.data.datasets;
+        const tooltipFilterHidesBaseline = canvas.payoffChart.config.options.plugins.tooltip.filter({ datasetIndex: 0 });
+        return JSON.stringify({ datasets, tooltipFilterHidesBaseline });
+    })()`, context));
+
+    assert.deepEqual(result.datasets.map(dataset => dataset.label), ['Zero P&L', 'Expiry', 'Selected date']);
+    assert.deepEqual(result.datasets[1].borderDash, [6, 4]);
+    assert.equal(result.datasets[1].data[25], -200);
+    assert.equal(result.tooltipFilterHidesBaseline, false);
+});
+
 test('position rendering does not fetch current prices automatically', () => {
     const { context, getFetchCalls } = createHarness();
     vm.runInContext(`rawFetchedRfqs = [{id:'manual-only',amount:1,legs:[{instrument_name:'BTC-28DEC26-100000-C',direction:'buy',ratio:1,price:0.02}]}]; renderStrategiesTable = () => {}; processAndRenderPositions();`, context);

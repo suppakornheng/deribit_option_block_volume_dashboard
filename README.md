@@ -11,6 +11,7 @@ How to run:
 1. Install Node.js 20 or newer.
 2. Run `npm ci` and `npm run build`.
 3. Open `dist/index.html` in a browser, then use the Upload JSONL panel or Deribit API pull to populate the dashboard.
+4. python3 -m http.server 4173 --directory dist
 
 Run `npm run check` and `npm test` to validate the JavaScript and core chart/view calculations.
 

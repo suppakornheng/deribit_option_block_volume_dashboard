@@ -68,6 +68,14 @@ button, input, select { transition: border-color 140ms ease, background-color 14
 .strategy-card .card-legs-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .strategy-card .card-legs-table td, .strategy-card .card-legs-table th { padding: 3px 6px; border-bottom: 1px dashed rgba(148,163,184,0.03); }
 .strategy-card .payoff-row { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed rgba(148,163,184,0.03); }
+.strategy-card .payoff-chart-container { position: relative; width: 100%; height: 180px; }
+.strategy-card .payoff-controls { display: grid; grid-template-columns: minmax(9rem, auto) minmax(8rem, 1fr) minmax(8rem, auto) minmax(12rem, auto); gap: 0.75rem; align-items: center; margin-bottom: 0.5rem; color: #aab8b6; font-size: 0.75rem; }
+.payoff-controls input[type="range"] { width: 100%; accent-color: var(--mint); }
+.payoff-controls input[type="date"] { min-width: 8rem; padding: 0.25rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; background: #121e22; color: #d7e0df; }
+.payoff-day-label { white-space: nowrap; }
+.payoff-iv-label { display: flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
+.payoff-iv-label input[type="range"] { min-width: 4rem; }
+.payoff-iv-label output { min-width: 2.5rem; color: #d7e0df; text-align: right; }
 
 /* Ensure payoff canvases and chart area have comfortable sizing */
 .dashboard-chart { height: 64vh !important; min-height: 340px; }
@@ -96,6 +104,9 @@ button, input, select { transition: border-color 140ms ease, background-color 14
 	.positions-toolbar-actions .inline-flex { flex-wrap: wrap; }
 	.strategy-card .card-top { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.35rem; }
 	.strategy-card .card-top .col-legs { grid-column: 1 / -1; grid-row: 2; }
+	.strategy-card .payoff-controls { grid-template-columns: auto minmax(5rem, 1fr); gap: 0.5rem; }
+	.strategy-card .payoff-day-label { grid-column: 1 / -1; }
+	.strategy-card .payoff-iv-label { grid-column: 1 / -1; }
 	#positionsTable .cards-header { display: none; }
 	#positionsTable { max-height: none; overflow: visible; }
 	.strategy-card .card-legs-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
